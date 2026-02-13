@@ -209,19 +209,17 @@ TIER_3_SOURCES: list[SourceConfig] = [
     ),
     SourceConfig(
         name="Reddit r/LocalLLaMA",
-        url="https://www.reddit.com/r/LocalLLaMA/new/.json",
+        url="https://www.reddit.com/r/LocalLLaMA/new/.rss",
         tier=SourceTier.TIER_3_COMMUNITY,
-        source_type="reddit_json",
+        source_type="rss",           # RSS — JSON API returns 403
         category="LLM",
-        headers={"User-Agent": REDDIT_USER_AGENT},
     ),
     SourceConfig(
         name="Reddit r/MachineLearning",
-        url="https://www.reddit.com/r/MachineLearning/new/.json",
+        url="https://www.reddit.com/r/MachineLearning/new/.rss",
         tier=SourceTier.TIER_3_COMMUNITY,
-        source_type="reddit_json",
+        source_type="rss",           # RSS — JSON API returns 403
         category="AI",
-        headers={"User-Agent": REDDIT_USER_AGENT},
     ),
     SourceConfig(
         name="Simon Willison's Weblog",
@@ -259,12 +257,7 @@ TIER_4_SOURCES: list[SourceConfig] = [
         source_type="arxiv",
         category="Research",
     ),
-    SourceConfig(
-        name="Hugging Face Daily Papers",
-        url="https://huggingface.co/papers/feed",
-        tier=SourceTier.TIER_4_RESEARCH,
-        category="Research",
-    ),
+    # Hugging Face Daily Papers — removed (returns 401, requires HF Token)
 ]
 
 # ---------------------------------------------------------------------------
