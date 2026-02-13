@@ -192,6 +192,16 @@ async def crawl_and_process(
             for a in articles
         ]
 
+    # ── Step 4: Filter out non-AI content ─────────────────────
+    # Articles categorized as "General" by the LLM are off-topic noise
+    # (e.g., HN posts about gaming, email tools, etc.)
+    before_filter = len(results)
+    results = [r for r in results if r.category != "General"]
+    general_removed = before_filter - len(results)
+    if general_removed:
+        log.info("Category filter: removed %d 'General' articles, %d remaining",
+                 general_removed, len(results))
+
     # ── Summary ────────────────────────────────────────────────
     elapsed = time.time() - start
     processed_count = sum(1 for r in results if r.is_processed)

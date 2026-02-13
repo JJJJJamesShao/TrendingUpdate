@@ -686,22 +686,31 @@ async def fetch_article_content(
     """
     url = article.url
     tag = f"[Content:{article.source_name}]"
+    MIN_CONTENT_CHARS = 100  # minimum chars to consider content valid
 
-    # ── Strategy 1: Jina Reader (preferred) ──
-    jina_text = await _fetch_content_via_jina(session, url, tag)
-    if jina_text and len(jina_text) > 200:
-        return truncate(jina_text, max_length=CONTENT_MAX_LENGTH, suffix="")
+    # ── Strategy 1: Jina Reader (preferred, but requires API key for reliability) ──
+    if JINA_API_KEY:
+        jina_text = await _fetch_content_via_jina(session, url, tag)
+        if jina_text and len(jina_text) > MIN_CONTENT_CHARS:
+            return truncate(jina_text, max_length=CONTENT_MAX_LENGTH, suffix="")
 
     # ── Strategy 2: Direct HTTP + HTML extraction ──
     direct_text = await _fetch_content_direct(session, url, tag)
-    if direct_text and len(direct_text) > 200:
+    if direct_text and len(direct_text) > MIN_CONTENT_CHARS:
         return truncate(direct_text, max_length=CONTENT_MAX_LENGTH, suffix="")
+
+    # ── Strategy 3: Jina without API key as last resort (rate-limited) ──
+    if not JINA_API_KEY:
+        jina_text = await _fetch_content_via_jina(session, url, tag)
+        if jina_text and len(jina_text) > MIN_CONTENT_CHARS:
+            return truncate(jina_text, max_length=CONTENT_MAX_LENGTH, suffix="")
 
     # ── Fallback: use existing snippet ──
     if article.content_snippet:
         log.debug("%s Using RSS snippet as content (%d chars)", tag, len(article.content_snippet))
         return article.content_snippet
 
+    log.debug("%s No content obtained for %s", tag, url[:80])
     return ""
 
 
@@ -793,6 +802,13 @@ async def fetch_contents_batch(
 
     fetched = sum(1 for a in articles if a.full_content)
     log.info("Content fetch complete: %d/%d articles have full content", fetched, len(articles))
+
+    if fetched < len(articles) and not JINA_API_KEY:
+        log.warning(
+            "  %d articles missing content. Set JINA_API_KEY for better coverage "
+            "(renders JS pages, bypasses bot protection).",
+            len(articles) - fetched,
+        )
 
     if own_session:
         await session.close()
