@@ -18,5 +18,9 @@ arxiv>=2.0.0                # ArXiv API wrapper for CS.AI / CS.CL papers
 # --- Database ---
 psycopg2-binary>=2.9.0      # PostgreSQL adapter for Supabase
 
+# --- Content Extraction ---
+trafilatura>=1.8.0          # Smart article extraction from HTML (free, local)
+html2text>=2024.2.0         # HTML → Markdown converter (preserves images & links)
+
 # --- Utilities ---
 python-dotenv>=1.0.0        # Load .env files for local development

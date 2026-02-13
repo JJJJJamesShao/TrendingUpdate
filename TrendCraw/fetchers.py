@@ -2,7 +2,7 @@
 AI Nexus - Source Fetchers
 ============================
 Async fetchers for all source types: RSS, Reddit JSON, Hacker News API, ArXiv.
-Uses Jina Reader API for rendering JS-heavy pages when needed.
+Multi-strategy content extraction: html2text, trafilatura, LLM fallback.
 
 All fetchers return a list of RawArticle dataclass instances.
 """
@@ -10,6 +10,7 @@ All fetchers return a list of RawArticle dataclass instances.
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
@@ -26,6 +27,7 @@ from config import (
     JINA_API_KEY,
     JINA_BASE_URL,
     JINA_SNIPPET_MIN_LENGTH,
+    MINIMAX_API_KEY,
     HN_FILTER_KEYWORDS,
     REQUEST_TIMEOUT_SECONDS,
     MAX_CONCURRENT_REQUESTS,
@@ -34,8 +36,24 @@ from config import (
     CONTENT_MAX_LENGTH,
     CONTENT_FETCH_CONCURRENCY,
     CONTENT_FETCH_TIMEOUT,
+    LLM_EXTRACT_MAX_INPUT,
 )
-from utils import log, strip_html, truncate, extract_article_text
+from utils import log, strip_html, truncate
+
+# ---------------------------------------------------------------------------
+# Optional dependencies for content extraction (graceful degradation)
+# ---------------------------------------------------------------------------
+try:
+    import trafilatura
+    _HAS_TRAFILATURA = True
+except ImportError:
+    _HAS_TRAFILATURA = False
+
+try:
+    import html2text as _html2text_mod
+    _HAS_HTML2TEXT = True
+except ImportError:
+    _HAS_HTML2TEXT = False
 
 
 # ---------------------------------------------------------------------------
@@ -668,115 +686,414 @@ async def fetch_all_sources(sources: list[SourceConfig]) -> list[RawArticle]:
     return all_articles
 
 
-# ---------------------------------------------------------------------------
-# Content Fetching: Fetch full article text for selected articles
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Content Extraction — Multi-strategy pipeline (zero-cost priority)
+# ===========================================================================
+# Strategy order:
+#   S1  Heuristic HTML isolation + html2text  →  Markdown with images  [FREE]
+#   S2  trafilatura smart extraction          →  plain text            [FREE]
+#   S3  html2text on cleaned full page        →  noisy Markdown        [FREE]
+#   S4  LLM extraction via MiniMax            →  Markdown              [token cost]
+#   --  RSS snippet fallback
+# ===========================================================================
+
+# ── Regex patterns for HTML cleaning ──────────────────────────────────────
+_BOILERPLATE_RE = re.compile(
+    r"<(script|style|noscript|iframe|svg|form)[^>]*>.*?</\1>",
+    re.DOTALL | re.IGNORECASE,
+)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_NAV_BLOCKS_RE = re.compile(
+    r"<(nav|footer|header|aside)\b[^>]*>.*?</\1>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Boilerplate text patterns to strip from Markdown output
+_SKIP_LINE_PATTERNS = [
+    "skip to content", "skip to main", "cookie policy", "accept all cookies",
+    "privacy policy", "terms of service", "terms of use",
+    "sign up", "sign in", "log in", "register",
+    "subscribe to", "newsletter signup", "get updates",
+    "share this", "share on", "follow us on",
+    "copyright ©", "all rights reserved",
+    "toggle navigation", "menu", "search for:",
+    "text settings", "story text", "subscribers only",
+    "advertisement", "sponsored content", "read more articles",
+]
+
+# Common CSS class names for the main article content block
+_CONTENT_CLASSES = [
+    "entry-content", "post-content", "article-content", "article-body",
+    "blog-post-content", "main-content", "story-body", "post-body",
+    "rich-text", "prose", "markdown-body", "content-body",
+]
+
+
+# ── HTML cleaning helpers ─────────────────────────────────────────────────
+def _clean_html_for_extraction(raw_html: str) -> str:
+    """Remove non-content HTML elements while preserving article body + images."""
+    html = _HTML_COMMENT_RE.sub("", raw_html)
+    html = _BOILERPLATE_RE.sub("", html)
+    html = _NAV_BLOCKS_RE.sub("", html)
+    return html
+
+
+def _isolate_main_content(raw_html: str) -> str:
+    """Use heuristics to locate the main article content block.
+
+    Checks (in priority order):
+      1. <article> tag  — standard semantic HTML5
+      2. <main> tag     — broader semantic block
+      3. role="main"    — ARIA role
+      4. Common CSS class patterns (WordPress, Ghost, Medium, etc.)
+
+    Returns the inner HTML of the matched block, or empty string.
+    """
+    html_lower = raw_html.lower()
+
+    # ── Priority 1: <article> ──
+    idx = html_lower.find("<article")
+    if idx != -1:
+        end = html_lower.rfind("</article>")
+        if end > idx and (end - idx) > 200:
+            return raw_html[idx : end + len("</article>")]
+
+    # ── Priority 2: <main> ──
+    idx = html_lower.find("<main")
+    if idx != -1:
+        end = html_lower.rfind("</main>")
+        if end > idx and (end - idx) > 200:
+            return raw_html[idx : end + len("</main>")]
+
+    # ── Priority 3: role="main" ──
+    m = re.search(r'<(\w+)[^>]*\brole=["\']main["\'][^>]*>', raw_html, re.IGNORECASE)
+    if m:
+        tag_name = m.group(1)
+        end_tag = f"</{tag_name}>"
+        end_idx = raw_html.lower().rfind(end_tag.lower(), m.end())
+        if end_idx > m.start() and (end_idx - m.start()) > 200:
+            return raw_html[m.start() : end_idx + len(end_tag)]
+
+    # ── Priority 4: common content class names ──
+    cls_pattern = "|".join(re.escape(c) for c in _CONTENT_CLASSES)
+    class_re = re.compile(
+        rf'<(div|section)[^>]*\bclass="[^"]*\b(?:{cls_pattern})\b[^"]*"[^>]*>',
+        re.IGNORECASE,
+    )
+    m = class_re.search(raw_html)
+    if m:
+        tag_name = m.group(1).lower()
+        # Walk forward counting nesting depth to find matching close tag
+        start_pos = m.start()
+        rest = raw_html[start_pos:]
+        open_tag = f"<{tag_name}"
+        close_tag = f"</{tag_name}>"
+        depth, i = 0, 0
+        while i < len(rest):
+            chunk_low = rest[i:].lower()
+            if chunk_low.startswith(open_tag):
+                depth += 1
+                i += len(open_tag)
+            elif chunk_low.startswith(close_tag):
+                depth -= 1
+                if depth == 0:
+                    block = rest[: i + len(close_tag)]
+                    if len(block) > 200:
+                        return block
+                    break
+                i += len(close_tag)
+            else:
+                i += 1
+
+    return ""
+
+
+# ── Markdown conversion helpers ───────────────────────────────────────────
+def _html_to_markdown(html_content: str, base_url: str = "") -> str:
+    """Convert HTML to clean Markdown via html2text.
+
+    Preserves: images ![alt](url), links [text](url), headings, lists.
+    """
+    if not _HAS_HTML2TEXT or not html_content:
+        return ""
+
+    h = _html2text_mod.HTML2Text()
+    h.body_width = 0              # don't hard-wrap lines
+    h.ignore_links = False
+    h.ignore_images = False       # keep images!
+    h.ignore_emphasis = False
+    h.skip_internal_links = True
+    h.unicode_snob = True
+    h.protect_links = True
+    h.wrap_links = False
+    h.single_line_break = False
+    if base_url:
+        h.baseurl = base_url
+
+    markdown = h.handle(html_content)
+    return _clean_markdown_output(markdown)
+
+
+def _clean_markdown_output(text: str) -> str:
+    """Post-process html2text output: collapse whitespace, strip boilerplate.
+
+    IMPORTANT: Lines containing Markdown images ``![`` or headings ``#``
+    are always preserved — the boilerplate filter only applies to short,
+    non-content lines (navigation items, footers, cookie banners, etc.).
+    """
+    if not text:
+        return ""
+
+    lines = text.split("\n")
+    cleaned: list[str] = []
+    blank_count = 0
+
+    for line in lines:
+        stripped = line.strip()
+
+        # ── Always preserve lines with Markdown images or headings ──
+        if "![" in stripped or stripped.startswith("#"):
+            cleaned.append(line)
+            blank_count = 0
+            continue
+
+        # ── Boilerplate filter — only for SHORT lines (likely nav/UI) ──
+        # Long lines (>120 chars) are almost certainly article paragraphs,
+        # so we never strip them even if they happen to contain a keyword.
+        if stripped and len(stripped) < 120:
+            lower = stripped.lower()
+            if any(p in lower for p in _SKIP_LINE_PATTERNS):
+                continue
+
+        # Collapse consecutive blank lines (max 2)
+        if not stripped:
+            blank_count += 1
+            if blank_count <= 2:
+                cleaned.append("")
+            continue
+        blank_count = 0
+
+        cleaned.append(line)
+
+    result = "\n".join(cleaned).strip()
+    # Final pass: collapse 4+ newlines → 3
+    result = re.sub(r"\n{4,}", "\n\n\n", result)
+    return result
+
+
+# ── Extraction strategy wrappers ──────────────────────────────────────────
+def _extract_with_trafilatura(raw_html: str, url: str) -> str:
+    """Extract article content using trafilatura (smart heuristic engine)."""
+    if not _HAS_TRAFILATURA:
+        return ""
+    try:
+        result = trafilatura.extract(
+            raw_html,
+            url=url,
+            include_images=True,
+            include_links=True,
+            include_formatting=True,
+            favor_recall=True,
+        )
+        return result or ""
+    except Exception as e:
+        log.debug("trafilatura extraction failed: %s", str(e)[:80])
+        return ""
+
+
+async def _extract_with_llm(
+    session: aiohttp.ClientSession,
+    raw_html: str,
+    title: str,
+    url: str,
+) -> str:
+    """Use MiniMax LLM to extract article content from HTML.
+
+    Expensive fallback — only invoked when rule-based methods fail.
+    Outputs clean Markdown with image references preserved.
+    """
+    from llm import chat_completion
+
+    if not MINIMAX_API_KEY:
+        return ""
+
+    # Clean & truncate to stay within token budget
+    cleaned = _clean_html_for_extraction(raw_html)
+    if len(cleaned) > LLM_EXTRACT_MAX_INPUT:
+        cleaned = cleaned[:LLM_EXTRACT_MAX_INPUT]
+
+    prompt = f"""Extract the main article content from the HTML below and output clean Markdown.
+
+ARTICLE TITLE: {title}
+SOURCE URL: {url}
+
+HTML:
+{cleaned}
+
+─── EXTRACTION RULES ───
+INCLUDE:
+- The complete main article body text
+- Section headings → ## or ### Markdown syntax
+- Images → ![description](full_image_url)
+  • Use the alt text as description (or "image" if none)
+  • Keep the full src URL exactly as-is
+- Important hyperlinks → [link text](url)
+- Code blocks → wrap in triple-backtick fences
+- Lists → Markdown bullet or numbered lists
+
+EXCLUDE:
+- Navigation menus, breadcrumbs
+- Page headers, footers, sidebars
+- Advertisements, banners, social sharing buttons
+- Comment sections, "Related articles"
+- Cookie notices, popups, author bios
+
+OUTPUT FORMAT:
+- Clean Markdown ONLY — start directly with the article content
+- Preserve the original text faithfully (do NOT summarize or rephrase)
+- If no meaningful article content exists, respond with exactly: NO_CONTENT"""
+
+    response = await chat_completion(
+        prompt,
+        system_prompt=(
+            "You are a precision web content extractor. "
+            "Output clean Markdown only. No commentary, no preamble."
+        ),
+        temperature=0,
+        max_tokens=3000,
+        session=session,
+    )
+
+    if response and response.strip() != "NO_CONTENT":
+        return response.strip()
+    return ""
+
+
+# ── Raw HTML fetcher ──────────────────────────────────────────────────────
+async def _fetch_raw_html(
+    session: aiohttp.ClientSession,
+    url: str,
+    tag: str,
+) -> str:
+    """Fetch raw HTML from a URL via direct HTTP GET.
+
+    Returns the full HTML string, or empty string on failure.
+    """
+    try:
+        timeout = aiohttp.ClientTimeout(total=CONTENT_FETCH_TIMEOUT)
+        headers = {"User-Agent": DEFAULT_USER_AGENT}
+        async with session.get(url, headers=headers, timeout=timeout) as resp:
+            if resp.status == 200:
+                ct = resp.headers.get("Content-Type", "")
+                if "html" in ct.lower() or "text" in ct.lower():
+                    text = await resp.text()
+                    log.debug("%s Fetched %d chars raw HTML", tag, len(text))
+                    return text
+                log.debug("%s Non-HTML content-type: %s", tag, ct[:50])
+            else:
+                log.debug("%s HTTP %d", tag, resp.status)
+    except Exception as e:
+        log.debug("%s HTML fetch failed: %s", tag, str(e)[:80])
+    return ""
+
+
+# ── Main content extraction pipeline ─────────────────────────────────────
 async def fetch_article_content(
     session: aiohttp.ClientSession,
     article: RawArticle,
 ) -> str:
-    """Fetch the full article text for a single article.
+    """Fetch & extract the full article text for a single article.
 
-    Strategy (in order of preference):
-    1. Jina Reader — best quality, handles JS rendering, returns clean Markdown.
-    2. Direct HTTP — fetch raw HTML, extract text with enhanced cleaner.
-    3. Fall back to existing content_snippet if both fail.
+    Zero-cost pipeline (strategies tried in order):
+      S1: Heuristic HTML isolation + html2text  → Markdown with images  [FREE]
+      S2: trafilatura smart extraction           → plain text            [FREE]
+      S3: html2text on cleaned full page         → noisy Markdown        [FREE]
+      S4: LLM extraction via MiniMax             → Markdown              [token cost]
+      --: RSS snippet fallback
 
-    Returns cleaned article text (truncated to CONTENT_MAX_LENGTH).
+    Returns cleaned article content (truncated to CONTENT_MAX_LENGTH).
     """
     url = article.url
     tag = f"[Content:{article.source_name}]"
-    MIN_CONTENT_CHARS = 100  # minimum chars to consider content valid
+    MIN_CHARS = 100  # minimum chars to accept extracted content
 
-    # ── Strategy 1: Jina Reader (preferred, but requires API key for reliability) ──
-    if JINA_API_KEY:
-        jina_text = await _fetch_content_via_jina(session, url, tag)
-        if jina_text and len(jina_text) > MIN_CONTENT_CHARS:
-            return truncate(jina_text, max_length=CONTENT_MAX_LENGTH, suffix="")
+    # ── Step 0: Fetch raw HTML ──
+    raw_html = await _fetch_raw_html(session, url, tag)
 
-    # ── Strategy 2: Direct HTTP + HTML extraction ──
-    direct_text = await _fetch_content_direct(session, url, tag)
-    if direct_text and len(direct_text) > MIN_CONTENT_CHARS:
-        return truncate(direct_text, max_length=CONTENT_MAX_LENGTH, suffix="")
+    if not raw_html:
+        # Direct fetch failed — use snippet if available
+        if article.content_snippet:
+            return article.content_snippet
+        log.debug("%s No HTML fetched and no snippet for %s", tag, url[:80])
+        return ""
 
-    # ── Strategy 3: Jina without API key as last resort (rate-limited) ──
-    if not JINA_API_KEY:
-        jina_text = await _fetch_content_via_jina(session, url, tag)
-        if jina_text and len(jina_text) > MIN_CONTENT_CHARS:
-            return truncate(jina_text, max_length=CONTENT_MAX_LENGTH, suffix="")
+    # ── S1 + S2: Run both, pick the best ──────────────────────────
+    # S1: heuristic isolation + html2text  (preserves images as ![alt](url))
+    s1_md = ""
+    main_block = _isolate_main_content(raw_html)
+    if main_block:
+        cleaned_block = _clean_html_for_extraction(main_block)
+        s1_md = _html_to_markdown(cleaned_block, base_url=url)
 
-    # ── Fallback: use existing snippet ──
+    # S2: trafilatura (better content detection, but loses image URLs)
+    s2_text = _extract_with_trafilatura(raw_html, url)
+
+    # Image-aware comparison:
+    #   - S1 (html2text) preserves images as ![alt](url)
+    #   - S2 (trafilatura) typically strips image URLs
+    #   - If S1 has images, strongly prefer it (require S2 to be 3x longer)
+    #   - If S1 has no images, prefer S2 if it has 1.5x more content
+    best = ""
+    best_label = ""
+
+    if s1_md and len(s1_md) > MIN_CHARS:
+        best, best_label = s1_md, "S1"
+
+    if s2_text and len(s2_text) > MIN_CHARS:
+        s1_has_images = "![" in best if best else False
+        if s1_has_images:
+            # S1 has images — only override if S2 has dramatically more text
+            if len(s2_text) > len(best) * 3:
+                best, best_label = s2_text, "S2"
+        else:
+            # S1 has no images — prefer S2 if it has moderately more content
+            if not best or len(s2_text) > len(best) * 1.5:
+                best, best_label = s2_text, "S2"
+
+    if best:
+        log.debug("%s %s: %d chars (images: %s)", tag, best_label, len(best), "![" in best)
+        return truncate(best, max_length=CONTENT_MAX_LENGTH, suffix="")
+
+    # ── S3: html2text on full cleaned page (noisier but comprehensive) ──
+    cleaned_full = _clean_html_for_extraction(raw_html)
+    md_full = _html_to_markdown(cleaned_full, base_url=url)
+    if md_full and len(md_full) > MIN_CHARS:
+        log.debug("%s S3 (full-page html2text): %d chars", tag, len(md_full))
+        return truncate(md_full, max_length=CONTENT_MAX_LENGTH, suffix="")
+
+    # ── S4: LLM extraction (expensive last resort) ──
+    llm_text = await _extract_with_llm(session, raw_html, article.title, url)
+    if llm_text and len(llm_text) > MIN_CHARS:
+        log.debug("%s S4 (LLM extraction): %d chars", tag, len(llm_text))
+        return truncate(llm_text, max_length=CONTENT_MAX_LENGTH, suffix="")
+
+    # ── Fallback: RSS snippet ──
     if article.content_snippet:
-        log.debug("%s Using RSS snippet as content (%d chars)", tag, len(article.content_snippet))
+        log.debug("%s Fallback (RSS snippet): %d chars", tag, len(article.content_snippet))
         return article.content_snippet
 
     log.debug("%s No content obtained for %s", tag, url[:80])
     return ""
 
 
-async def _fetch_content_via_jina(
-    session: aiohttp.ClientSession,
-    url: str,
-    tag: str,
-) -> str:
-    """Fetch article content via Jina Reader API (returns clean Markdown)."""
-    jina_url = f"{JINA_BASE_URL}{url}"
-    headers: dict[str, str] = {
-        "Accept": "text/plain",
-        "User-Agent": DEFAULT_USER_AGENT,
-    }
-    if JINA_API_KEY:
-        headers["Authorization"] = f"Bearer {JINA_API_KEY}"
-
-    try:
-        timeout = aiohttp.ClientTimeout(total=CONTENT_FETCH_TIMEOUT)
-        async with session.get(jina_url, headers=headers, timeout=timeout) as resp:
-            if resp.status == 200:
-                text = await resp.text()
-                cleaned = strip_html(text)
-                log.debug("%s Jina fetched %d chars", tag, len(cleaned))
-                return cleaned
-            else:
-                log.debug("%s Jina HTTP %d", tag, resp.status)
-    except Exception as e:
-        log.debug("%s Jina failed: %s", tag, str(e)[:80])
-    return ""
-
-
-async def _fetch_content_direct(
-    session: aiohttp.ClientSession,
-    url: str,
-    tag: str,
-) -> str:
-    """Fetch article content via direct HTTP and extract text from HTML."""
-    try:
-        timeout = aiohttp.ClientTimeout(total=CONTENT_FETCH_TIMEOUT)
-        headers = {"User-Agent": DEFAULT_USER_AGENT}
-        async with session.get(url, headers=headers, timeout=timeout) as resp:
-            if resp.status == 200:
-                content_type = resp.headers.get("Content-Type", "")
-                # Only process HTML pages
-                if "html" in content_type.lower() or "text" in content_type.lower():
-                    raw_html = await resp.text()
-                    cleaned = extract_article_text(raw_html)
-                    log.debug("%s Direct fetch %d chars → %d cleaned", tag, len(raw_html), len(cleaned))
-                    return cleaned
-                else:
-                    log.debug("%s Non-HTML content type: %s", tag, content_type[:50])
-            else:
-                log.debug("%s Direct HTTP %d", tag, resp.status)
-    except Exception as e:
-        log.debug("%s Direct fetch failed: %s", tag, str(e)[:80])
-    return ""
-
-
+# ── Batch content fetcher ─────────────────────────────────────────────────
 async def fetch_contents_batch(
     articles: list[RawArticle],
     session: aiohttp.ClientSession | None = None,
 ) -> None:
-    """Fetch full article content for a batch of articles (in parallel).
+    """Fetch full article content for a batch of articles in parallel.
 
-    Updates each article's `full_content` field in-place.
+    Updates each article's ``full_content`` field in-place.
     """
     if not articles:
         return
@@ -803,10 +1120,9 @@ async def fetch_contents_batch(
     fetched = sum(1 for a in articles if a.full_content)
     log.info("Content fetch complete: %d/%d articles have full content", fetched, len(articles))
 
-    if fetched < len(articles) and not JINA_API_KEY:
-        log.warning(
-            "  %d articles missing content. Set JINA_API_KEY for better coverage "
-            "(renders JS pages, bypasses bot protection).",
+    if fetched < len(articles):
+        log.info(
+            "  %d articles without content (JS-rendered pages, paywalls, etc.)",
             len(articles) - fetched,
         )
 

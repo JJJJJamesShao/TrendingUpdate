@@ -50,11 +50,12 @@ LLM_REQUEST_TIMEOUT = 45         # Timeout for LLM API calls (was 60)
 # For hourly cron: 3h gives a safe margin. For first-run seeding: use --max-age 168 (7d).
 ARTICLE_MAX_AGE_HOURS = 3
 
-# ── Content fetching ──
-CONTENT_MAX_LENGTH = 8000        # Max chars to store in the `content` column
+# ── Content fetching & extraction ──
+CONTENT_MAX_LENGTH = 10000       # Max chars to store in the `content` column (Markdown)
 CONTENT_SNIPPET_FOR_LLM = 3000  # Max content chars sent to LLM for summarization
 CONTENT_FETCH_CONCURRENCY = 5   # Parallel content page fetches
 CONTENT_FETCH_TIMEOUT = 20      # Seconds per content page fetch
+LLM_EXTRACT_MAX_INPUT = 12000   # Max chars of cleaned HTML to send to LLM extractor
 
 # HTTP defaults — many corporate blogs block bare aiohttp user-agents
 DEFAULT_USER_AGENT = (
