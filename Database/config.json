@@ -1,0 +1,15 @@
+[
+    {
+        "table": "ai",
+        "columns": [
+            "id", "title", "link", "summary", "content", "up_time"
+        ]
+    },
+    {
+        "table": "news_items",
+        "columns": [
+            "id", "title", "original_url", "source_name", "summary",
+            "content", "published_at", "created_at", "category", "is_processed"
+        ]
+    }
+]

@@ -1,0 +1,22 @@
+# ============================================
+# AI Nexus - TrendCraw Dependencies
+# Python 3.10+
+# ============================================
+
+# --- Async Networking ---
+aiohttp>=3.9.0              # Async HTTP client (source fetching + MiniMax API)
+
+# --- RSS / Feed Parsing ---
+feedparser>=6.0.0           # Universal RSS/Atom feed parser
+
+# --- String Similarity / Deduplication ---
+rapidfuzz>=3.0.0            # Fast fuzzy string matching (title dedup)
+
+# --- ArXiv Paper Fetching ---
+arxiv>=2.0.0                # ArXiv API wrapper for CS.AI / CS.CL papers
+
+# --- Utilities ---
+python-dotenv>=1.0.0        # Load .env files for local development
+
+# --- Database (used by Database/ module, not TrendCraw directly) ---
+psycopg2-binary>=2.9.0      # PostgreSQL adapter for Supabase

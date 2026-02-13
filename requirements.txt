@@ -1,0 +1,22 @@
+# ============================================
+# AI Nexus - Full Pipeline Dependencies
+# Python 3.12+
+# ============================================
+
+# --- Async Networking ---
+aiohttp>=3.9.0              # Async HTTP client (source fetching + MiniMax API)
+
+# --- RSS / Feed Parsing ---
+feedparser>=6.0.0           # Universal RSS/Atom feed parser
+
+# --- String Similarity / Deduplication ---
+rapidfuzz>=3.0.0            # Fast fuzzy string matching (title dedup)
+
+# --- ArXiv Paper Fetching ---
+arxiv>=2.0.0                # ArXiv API wrapper for CS.AI / CS.CL papers
+
+# --- Database ---
+psycopg2-binary>=2.9.0      # PostgreSQL adapter for Supabase
+
+# --- Utilities ---
+python-dotenv>=1.0.0        # Load .env files for local development
