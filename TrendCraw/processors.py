@@ -277,16 +277,16 @@ Rules:
 - category: Choose the most specific applicable category.
 - importance: Integer 1-10 (10 = groundbreaking release/discovery, 1 = minor update).
 
-Return ONLY the JSON object, no other text."""
+CRITICAL: Return ONLY the raw JSON object. Do NOT wrap in markdown. Do NOT include any reasoning, thinking, or explanation. Start your response with {{ and end with }}."""
 
     response = await chat_completion(
         prompt,
         system_prompt=(
             "You are a senior AI industry analyst. "
-            "Provide concise, insightful summaries of AI news for a professional audience."
+            "Respond with ONLY valid JSON. No reasoning, no explanations, no markdown."
         ),
-        temperature=0.3,
-        max_tokens=400,
+        temperature=0.1,
+        max_tokens=800,
         session=session,
     )
 

@@ -41,14 +41,14 @@ JINA_BASE_URL = "https://r.jina.ai/"
 DEDUP_SIMILARITY_THRESHOLD = 85  # rapidfuzz score threshold (0-100)
 DEDUP_TIME_WINDOW_HOURS = 24     # Only compare against items from last N hours
 LLM_CLUSTER_BATCH_SIZE = 25      # Max items per LLM clustering call
-REQUEST_TIMEOUT_SECONDS = 30     # Per-request timeout for aiohttp
+REQUEST_TIMEOUT_SECONDS = 15     # Per-request timeout for aiohttp (was 30)
 MAX_CONCURRENT_REQUESTS = 10     # Semaphore limit for parallel fetches
-LLM_REQUEST_TIMEOUT = 60         # Timeout for LLM API calls (seconds)
+LLM_REQUEST_TIMEOUT = 45         # Timeout for LLM API calls (was 60)
 
 # ── Freshness filter ──
-# Discard articles published more than N days ago.
-# Prevents ingesting years-old blog archives (e.g. OpenAI's 842 posts from 2015).
-ARTICLE_MAX_AGE_DAYS = 7
+# Only process articles published within the last N hours.
+# For hourly cron: 3h gives a safe margin. For first-run seeding: use --max-age 168 (7d).
+ARTICLE_MAX_AGE_HOURS = 3
 
 # ── Content fetching ──
 CONTENT_MAX_LENGTH = 8000        # Max chars to store in the `content` column
@@ -62,8 +62,8 @@ DEFAULT_USER_AGENT = (
 )
 
 # Retry configuration for transient failures
-FETCH_MAX_RETRIES = 3            # Total attempts = 1 initial + retries
-FETCH_RETRY_BACKOFF = 2.0        # Exponential backoff base (seconds)
+FETCH_MAX_RETRIES = 2            # Total attempts (was 3 — faster fail)
+FETCH_RETRY_BACKOFF = 1.5        # Exponential backoff base (was 2.0)
 
 # Jina content fallback: fetch full text via Jina when snippet is shorter than this
 JINA_SNIPPET_MIN_LENGTH = 80     # Characters

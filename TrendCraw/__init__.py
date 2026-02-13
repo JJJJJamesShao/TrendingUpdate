@@ -35,7 +35,7 @@ from config import (
     MINIMAX_API_KEY,
     DEFAULT_USER_AGENT,
     MAX_CONCURRENT_REQUESTS,
-    ARTICLE_MAX_AGE_DAYS,
+    ARTICLE_MAX_AGE_HOURS,
 )
 from fetchers import fetch_all_sources, fetch_contents_batch, RawArticle
 from processors import (
@@ -58,6 +58,7 @@ async def crawl_and_process(
     skip_llm_cluster: bool = False,
     skip_enrichment: bool = False,
     enrich_limit: int = 0,
+    max_age_hours: int = 0,
 ) -> list[ProcessedArticle]:
     """One-call interface: Fetch → Deduplicate → Summarize → Return.
 
@@ -72,6 +73,7 @@ async def crawl_and_process(
         skip_llm_cluster: If True, skip the LLM semantic clustering step.
         skip_enrichment:  If True, skip LLM summarization (return unprocessed articles).
         enrich_limit:     If > 0, only enrich the first N articles (saves API quota).
+        max_age_hours:    Override freshness filter (0 = use config default).
 
     Returns:
         List of ProcessedArticle ready for database insertion via .to_db_dict().
@@ -96,12 +98,13 @@ async def crawl_and_process(
         return []
 
     # ── Step 1b: Freshness filter — discard old articles ──────
-    cutoff = datetime.now(timezone.utc) - timedelta(days=ARTICLE_MAX_AGE_DAYS)
+    age_hours = max_age_hours if max_age_hours > 0 else ARTICLE_MAX_AGE_HOURS
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=age_hours)
     before_filter = len(raw_articles)
     raw_articles = [a for a in raw_articles if a.published_at >= cutoff]
     log.info(
-        "Freshness filter (max %d days): %d → %d (discarded %d old articles)",
-        ARTICLE_MAX_AGE_DAYS, before_filter, len(raw_articles),
+        "Freshness filter (max %dh): %d → %d (discarded %d old articles)",
+        age_hours, before_filter, len(raw_articles),
         before_filter - len(raw_articles),
     )
 

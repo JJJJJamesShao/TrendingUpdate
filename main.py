@@ -63,6 +63,13 @@ Examples:
         action="store_true",
         help="Skip LLM semantic clustering step",
     )
+    parser.add_argument(
+        "--max-age",
+        type=int,
+        default=0,
+        metavar="HOURS",
+        help="Only process articles from the last N hours (0 = use config default: 3h)",
+    )
     return parser.parse_args()
 
 
@@ -102,6 +109,7 @@ def run_full_pipeline(args: argparse.Namespace) -> int:
         known_titles=known_titles,
         skip_llm_cluster=args.skip_cluster,
         enrich_limit=args.limit,
+        max_age_hours=args.max_age,
     ))
 
     if not articles:
@@ -149,6 +157,7 @@ def run_dry_run(args: argparse.Namespace) -> int:
         skip_llm_cluster=args.skip_cluster or not enable_llm,
         skip_enrichment=skip_enrich,
         enrich_limit=args.limit,
+        max_age_hours=args.max_age,
     ))
 
     if not articles:

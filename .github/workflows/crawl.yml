@@ -1,22 +1,26 @@
 name: AI Nexus — Crawl & Enrich Pipeline
 
 on:
-  # Scheduled: every 60 minutes
+  # Scheduled: every 2 hours (safe within free tier 2000 min/month)
   schedule:
-    - cron: "0 * * * *"        # At minute 0 of every hour (UTC)
+    - cron: "0 */2 * * *"
 
   # Manual trigger from GitHub UI (Actions tab → Run workflow)
   workflow_dispatch:
     inputs:
       limit:
-        description: "Max articles to enrich (0 = no limit)"
+        description: "Max articles to enrich (default 50)"
+        required: false
+        default: "50"
+      max_age:
+        description: "Max article age in hours (0 = default 3h)"
         required: false
         default: "0"
       skip_cluster:
         description: "Skip LLM semantic clustering"
         required: false
         type: boolean
-        default: false
+        default: true
 
 env:
   PYTHON_VERSION: "3.12"
@@ -25,7 +29,7 @@ jobs:
   crawl:
     name: Crawl → Deduplicate → Enrich → Persist
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
       # ── 1. Checkout code ─────────────────────────────────────
@@ -68,10 +72,13 @@ jobs:
           MINIMAX_MODEL: ${{ secrets.MINIMAX_MODEL }}
           # Optional
           JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+          # Reduce log noise
+          LOG_LEVEL: WARNING
         run: |
           python main.py \
-            --limit ${{ github.event.inputs.limit || '0' }} \
-            ${{ github.event.inputs.skip_cluster == 'true' && '--skip-cluster' || '' }}
+            --skip-cluster \
+            --limit ${{ github.event.inputs.limit || '50' }} \
+            --max-age ${{ github.event.inputs.max_age || '0' }}
 
       # ── 6. Summary ──────────────────────────────────────────
       - name: Pipeline summary

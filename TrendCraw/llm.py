@@ -8,6 +8,7 @@ Uses aiohttp for non-blocking calls within the async pipeline.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import aiohttp
@@ -106,7 +107,7 @@ async def chat_completion(
             usage.get("total_tokens", 0),
         )
 
-        return content.strip()
+        return _strip_think_tags(content.strip())
 
     except Exception as e:
         log.error("MiniMax API call failed: %s", e)
@@ -114,6 +115,29 @@ async def chat_completion(
     finally:
         if own_session:
             await session.close()
+
+
+# ---------------------------------------------------------------------------
+# Helper: Strip <think>...</think> reasoning blocks from LLM output
+# ---------------------------------------------------------------------------
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINK_OPEN_RE = re.compile(r"<think>.*", re.DOTALL)
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> blocks from model output.
+
+    Some models (e.g. MiniMax M2.5) emit chain-of-thought reasoning
+    wrapped in <think> tags before the actual answer. This strips them.
+    Also handles unclosed <think> (when thinking exhausted max_tokens).
+    """
+    if "<think>" not in text:
+        return text
+    # Strip complete <think>...</think> blocks
+    cleaned = _THINK_RE.sub("", text)
+    # Handle unclosed <think> (model ran out of tokens mid-thought)
+    cleaned = _THINK_OPEN_RE.sub("", cleaned)
+    return cleaned.strip()
 
 
 # ---------------------------------------------------------------------------
