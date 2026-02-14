@@ -19,10 +19,13 @@ from typing import Any
 import aiohttp
 from rapidfuzz import fuzz
 
+import asyncio
+
 from config import (
     DEDUP_SIMILARITY_THRESHOLD,
     LLM_CLUSTER_BATCH_SIZE,
     CONTENT_SNIPPET_FOR_LLM,
+    LLM_ENRICH_CONCURRENCY,
 )
 from fetchers import RawArticle
 from llm import chat_completion, parse_json_response, parse_json_array
@@ -238,85 +241,260 @@ No explanation, no markdown, just the JSON array."""
 
 
 # ===================================================================
-# STEP 4: Content Enrichment (Summarize via MiniMax)
+# STEP 4: Editorial Screening + Structured Summary (Combined LLM Call)
 # ===================================================================
+
+def _generate_fallback_content(article: RawArticle, summary: str | None) -> str:
+    """Generate minimal structured content when LLM enrichment fails."""
+    parts = [f"## Overview\n\n{article.title}"]
+    if summary:
+        parts.append(f"\n\n{summary}")
+    elif article.content_snippet:
+        parts.append(f"\n\n{article.content_snippet[:500]}")
+    parts.append(
+        f"\n\n## Source\n\n"
+        f"- **{article.source_name}** — Published {article.published_at.strftime('%Y-%m-%d')}\n"
+        f"- [Read original article]({article.url})"
+    )
+    return "\n".join(parts)
+
+
+def _build_arxiv_prompt(article: RawArticle, content: str) -> tuple[str, str]:
+    """Build specialized prompt for ArXiv research paper analysis."""
+    prompt = f"""Analyze the following AI/ML research paper and produce a professional academic summary.
+
+─── PAPER ───
+Title: {article.title}
+Source: {article.source_name}
+Published: {article.published_at.strftime("%Y-%m-%d")}
+URL: {article.url}
+───
+{content}
+────────────────
+
+Produce a comprehensive research summary with the following Markdown sections:
+
+## Problem Statement
+What problem does this paper address? What gap in existing research does it fill? (2-3 sentences)
+
+## Proposed Approach
+What method, model, or framework do the authors propose? Describe the core idea clearly. (3-5 sentences)
+
+## Key Innovations
+- What is novel about this work compared to prior art?
+- List 3-5 specific technical contributions
+
+## Methodology & Architecture
+Describe the technical approach: model architecture, training procedure, datasets used, loss functions, or theoretical framework. Include specific numbers (parameters, layers, training steps) when available.
+
+## Results & Benchmarks
+- Report ALL quantitative results mentioned in the abstract
+- Include benchmark names, metrics, and scores
+- Note comparisons with baselines or prior state-of-the-art
+
+## Significance & Implications
+Why does this paper matter? What are the practical implications for the AI community?
+
+TARGET LENGTH: 1500-2500 characters. Be thorough and precise.
+
+═══ RESPONSE FORMAT ═══
+Return ONLY valid JSON:
+{{
+  "is_newsworthy": true,
+  "reject_reason": "",
+  "category": "Research",
+  "importance": 7,
+  "summary": "2-3 sentence summary: what the paper proposes and its key result",
+  "content": "## Problem Statement\\n...\\n\\n## Proposed Approach\\n...\\n\\n..."
+}}
+
+If the paper is NOT about AI/ML (e.g., pure mathematics, biology without ML):
+{{
+  "is_newsworthy": false,
+  "reject_reason": "Not AI/ML research",
+  "category": "General",
+  "importance": 0,
+  "summary": "",
+  "content": ""
+}}"""
+
+    sys_prompt = (
+        "You are an AI/ML research scientist writing paper summaries for a professional audience. "
+        "Extract ALL technical details from the abstract. Be precise with numbers and methodology. "
+        "Respond with ONLY valid JSON. No reasoning, no markdown fences."
+    )
+    return prompt, sys_prompt
+
+
+def _build_news_prompt(article: RawArticle, content: str) -> tuple[str, str]:
+    """Build editorial screening + summary prompt for general AI news."""
+    prompt = f"""Analyze the article below. First decide whether to PUBLISH, then produce a comprehensive summary.
+
+─── ARTICLE ───
+Title: {article.title}
+Source: {article.source_name}
+Published: {article.published_at.strftime("%Y-%m-%d")}
+───
+{content}
+────────────────
+
+═══ STEP 1: TOPIC SCREENING ═══
+
+The PRIMARY subject of the article must be about AI/ML technology, products, research, or the AI industry.
+
+PUBLISH (is_newsworthy = true) — the article's CORE topic is:
+• New AI/ML model releases, major version updates, or AI product launches
+• Research papers presenting novel AI/ML findings or breakthroughs
+• Open-source AI/ML project launches or significant milestones
+• AI industry moves: acquisitions, partnerships, regulation, policy affecting AI
+• Benchmark results, performance comparisons between AI systems
+• Technical deep-dives into AI architectures, training methods, or deployment
+• New AI developer tools, frameworks, or infrastructure
+• Discoveries or discussions about specific AI systems (e.g., Claude, GPT, LLaMA)
+
+REJECT (is_newsworthy = false):
+• Articles that merely MENTION AI/tech companies or figures but are NOT about AI technology (e.g., personal scandals, lawsuits, celebrity gossip involving tech CEOs)
+• User questions, polls, or community discussion threads ("Ask HN:", Reddit Q&A)
+• Job postings, hiring threads, career advice
+• Articles about politics, crime, or entertainment that only tangentially reference AI
+• Personal opinions or blog posts without substantive technical analysis
+• Vague rumors, unverified speculation, memes
+• Routine minor patches, changelogs, or trivial updates
+
+KEY TEST: If you remove "AI/ML" from the article, does the core story still stand as non-AI news? If yes → REJECT.
+
+═══ STEP 2: COMPREHENSIVE SUMMARY (only if publishable) ═══
+
+Write a DETAILED editorial summary based on ALL the content provided. The reader will NOT read the original article — your summary must be a complete, standalone piece that captures every important point.
+
+- Extract and distill ALL key information from the original text
+- Target 1500-3000 characters
+- Include every specific number, metric, benchmark, date, and direct quote
+- Do NOT fabricate or speculate beyond what the source material states
+
+Section structure:
+
+## Overview
+Comprehensive introduction: who, what, when, why. (3-5 sentences)
+
+## Key Highlights
+- 5-8 bullet points covering ALL major points from the original article
+- Include ALL specific numbers, metrics, benchmarks, dates, and direct quotes
+
+## Technical Details
+(For technical content — skip ONLY for pure business news)
+Detailed coverage: architecture, methodology, performance metrics, key innovations
+
+## Impact & Significance
+What this means for the AI industry, developers, researchers, and end users.
+
+═══ RESPONSE FORMAT ═══
+Return ONLY valid JSON (no markdown fences, no reasoning):
+{{
+  "is_newsworthy": true,
+  "reject_reason": "",
+  "category": "AI or LLM or Hardware or Research or Industry",
+  "importance": 7,
+  "summary": "2-3 sentence executive summary for the article card",
+  "content": "## Overview\\n...\\n\\n## Key Highlights\\n- ...\\n\\n..."
+}}
+
+If NOT publishable:
+{{
+  "is_newsworthy": false,
+  "reject_reason": "brief reason",
+  "category": "General",
+  "importance": 0,
+  "summary": "",
+  "content": ""
+}}"""
+
+    sys_prompt = (
+        "You are a senior AI industry editor writing for an expert readership. "
+        "Produce thorough, detailed article summaries that capture ALL key information "
+        "from the source material. Respond with ONLY valid JSON. No reasoning, no markdown fences."
+    )
+    return prompt, sys_prompt
+
+
 async def enrich_article(
     article: RawArticle,
     session: aiohttp.ClientSession | None = None,
-) -> ProcessedArticle:
-    """Use MiniMax to generate a summary, category, and importance score.
+) -> ProcessedArticle | None:
+    """Evaluate news-worthiness and generate structured editorial summary.
 
-    Uses the best available content: full_content > content_snippet > title only.
-    Prompts are in ENGLISH — the product targets international users.
+    Uses DIFFERENT prompts for:
+    - ArXiv research papers → specialized academic extraction
+    - General news articles → editorial screening + summary
+
+    Returns:
+        ProcessedArticle with LLM-generated content, or
+        None if the article is not newsworthy (rejected by editorial filter).
     """
+    is_arxiv = "arxiv" in article.source_name.lower()
+
     # Pick the best available content for the LLM prompt
     if article.full_content:
         content_for_llm = article.full_content[:CONTENT_SNIPPET_FOR_LLM]
     elif article.content_snippet:
         content_for_llm = article.content_snippet[:CONTENT_SNIPPET_FOR_LLM]
     else:
-        content_for_llm = "(no content available — summarize from title only)"
+        content_for_llm = ""
 
-    prompt = f"""Analyze the following AI/tech news article and provide a structured summary.
-
-TITLE: {article.title}
-SOURCE: {article.source_name}
-PUBLISHED: {article.published_at.strftime("%Y-%m-%d")}
-CONTENT:
-{content_for_llm}
-
-Respond with a JSON object containing:
-{{
-  "summary": "A concise 2-3 sentence summary highlighting the key points and significance",
-  "category": "One of: AI, LLM, Hardware, Research, Industry, General",
-  "importance": 7
-}}
-
-Rules:
-- summary: Write in clear, professional English. Focus on WHAT happened and WHY it matters.
-- category: Choose the most specific applicable category.
-- importance: Integer 1-10 (10 = groundbreaking release/discovery, 1 = minor update).
-
-CRITICAL: Return ONLY the raw JSON object. Do NOT wrap in markdown. Do NOT include any reasoning, thinking, or explanation. Start your response with {{ and end with }}."""
+    if is_arxiv:
+        prompt, sys_prompt = _build_arxiv_prompt(article, content_for_llm)
+    else:
+        prompt, sys_prompt = _build_news_prompt(article, content_for_llm)
 
     response = await chat_completion(
         prompt,
-        system_prompt=(
-            "You are a senior AI industry analyst. "
-            "Respond with ONLY valid JSON. No reasoning, no explanations, no markdown."
-        ),
-        temperature=0.1,
-        max_tokens=800,
+        system_prompt=sys_prompt,
+        temperature=0.2,
+        max_tokens=2000,
         session=session,
     )
-
-    # Determine stored content: full_content > snippet > empty
-    stored_content = article.full_content or article.content_snippet or None
 
     result = parse_json_response(response)
 
     if result:
+        # ── Editorial rejection ──
+        if not result.get("is_newsworthy", True):
+            reason = result.get("reject_reason", "not newsworthy")
+            log.info("  → Rejected: %s", reason[:80])
+            return None
+
+        content = result.get("content", "")
+        summary = result.get("summary", "")
+
+        # Ensure content is not empty — fallback if LLM returned thin content
+        if not content or len(content.strip()) < 50:
+            content = _generate_fallback_content(article, summary)
+
+        # Ensure summary is not empty
+        if not summary:
+            summary = f"{article.title} — from {article.source_name}."
+
         return ProcessedArticle(
             title=article.title,
             original_url=article.url,
             source_name=article.source_name,
             published_at=article.published_at,
             category=result.get("category", article.category),
-            summary=result.get("summary", ""),
-            content=stored_content,
+            summary=summary,
+            content=content,
             is_processed=True,
         )
 
-    # Fallback: insert without enrichment but still store content
-    log.warning("Enrichment failed for '%s' — inserting unprocessed", article.title[:50])
+    # ── LLM call failed entirely — use fallback content ──
+    log.warning("Enrichment failed for '%s' — generating fallback", article.title[:50])
     return ProcessedArticle(
         title=article.title,
         original_url=article.url,
         source_name=article.source_name,
         published_at=article.published_at,
         category=article.category,
-        summary=None,
-        content=stored_content,
+        summary=f"{article.title} — from {article.source_name}.",
+        content=_generate_fallback_content(article, None),
         is_processed=False,
     )
 
@@ -325,18 +503,31 @@ async def enrich_all(
     articles: list[RawArticle],
     session: aiohttp.ClientSession | None = None,
 ) -> list[ProcessedArticle]:
-    """Enrich all articles with LLM-generated summaries.
+    """Enrich all articles with LLM-generated editorial summaries.
 
-    Processes sequentially to respect MiniMax rate limits.
+    Runs with limited concurrency (LLM_ENRICH_CONCURRENCY) to balance
+    speed and rate limits. Non-newsworthy articles are filtered out.
     """
-    log.info("Starting enrichment for %d articles...", len(articles))
-    items: list[ProcessedArticle] = []
+    log.info("Starting enrichment for %d articles (concurrency=%d)...",
+             len(articles), LLM_ENRICH_CONCURRENCY)
 
-    for i, article in enumerate(articles, 1):
-        log.info("  Enriching [%d/%d]: %s", i, len(articles), article.title[:60])
-        item = await enrich_article(article, session)
-        items.append(item)
+    sem = asyncio.Semaphore(LLM_ENRICH_CONCURRENCY)
+    total = len(articles)
 
-    processed = sum(1 for it in items if it.is_processed)
-    log.info("Enrichment complete: %d/%d successfully processed", processed, len(items))
-    return items
+    async def _enrich_one(i: int, article: RawArticle) -> ProcessedArticle | None:
+        async with sem:
+            log.info("  Enriching [%d/%d]: %s", i, total, article.title[:60])
+            return await enrich_article(article, session)
+
+    tasks = [_enrich_one(i, a) for i, a in enumerate(articles, 1)]
+    raw_results = await asyncio.gather(*tasks)
+
+    # Filter: remove rejected (None) and empty-content articles
+    results = [r for r in raw_results if r is not None and r.content]
+
+    rejected = sum(1 for r in raw_results if r is None)
+    processed = sum(1 for r in results if r.is_processed)
+
+    log.info("Enrichment complete: %d published, %d rejected, %d total input",
+             len(results), rejected, total)
+    return results

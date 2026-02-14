@@ -516,8 +516,13 @@ async def fetch_hackernews(session: aiohttp.ClientSession, source: SourceConfig)
         title = item.get("title", "")
         url = item.get("url", "")
 
-        # Filter: must match at least one keyword
+        # Pre-filter: skip user questions & discussion threads
+        # Keep "Show HN:" (new project announcements are valuable)
         title_lower = title.lower()
+        if title_lower.startswith("ask hn:") or title_lower.startswith("tell hn:"):
+            continue
+
+        # Filter: must match at least one AI keyword
         if not any(kw in title_lower for kw in keywords_lower):
             continue
 
@@ -569,6 +574,21 @@ async def fetch_arxiv(source: SourceConfig) -> list[RawArticle]:
             if pub_date < cutoff:
                 continue  # Skip papers older than 48h
 
+            abstract = (result.summary or "").strip()
+            # Build a rich full_content from ArXiv metadata so the LLM
+            # can produce high-quality research summaries.
+            authors = ", ".join(a.name for a in (result.authors or [])[:10])
+            categories = ", ".join(result.categories or [])
+            full_text_parts = []
+            if authors:
+                full_text_parts.append(f"Authors: {authors}")
+            if categories:
+                full_text_parts.append(f"Categories: {categories}")
+            if result.pdf_url:
+                full_text_parts.append(f"PDF: {result.pdf_url}")
+            full_text_parts.append(f"\nAbstract:\n{abstract}")
+            full_content = "\n".join(full_text_parts)
+
             articles.append(RawArticle(
                 title=result.title.strip(),
                 url=result.entry_id,
@@ -576,7 +596,8 @@ async def fetch_arxiv(source: SourceConfig) -> list[RawArticle]:
                 tier=source.tier,
                 category=source.category,
                 published_at=pub_date,
-                content_snippet=result.summary[:500] if result.summary else "",
+                content_snippet=abstract[:500] if abstract else "",
+                full_content=full_content,
             ))
         return articles
 
@@ -1109,6 +1130,8 @@ async def fetch_contents_batch(
     sem = asyncio.Semaphore(CONTENT_FETCH_CONCURRENCY)
 
     async def _fetch_one(article: RawArticle) -> None:
+        if article.full_content:  # Already has content (e.g., ArXiv abstract)
+            return
         async with sem:
             content = await fetch_article_content(session, article)
             article.full_content = content

@@ -41,18 +41,19 @@ JINA_BASE_URL = "https://r.jina.ai/"
 DEDUP_SIMILARITY_THRESHOLD = 85  # rapidfuzz score threshold (0-100)
 DEDUP_TIME_WINDOW_HOURS = 24     # Only compare against items from last N hours
 LLM_CLUSTER_BATCH_SIZE = 25      # Max items per LLM clustering call
-REQUEST_TIMEOUT_SECONDS = 15     # Per-request timeout for aiohttp (was 30)
+REQUEST_TIMEOUT_SECONDS = 10     # Per-request timeout for aiohttp (was 15)
 MAX_CONCURRENT_REQUESTS = 10     # Semaphore limit for parallel fetches
-LLM_REQUEST_TIMEOUT = 45         # Timeout for LLM API calls (was 60)
+LLM_REQUEST_TIMEOUT = 45         # Timeout for LLM API calls
+LLM_ENRICH_CONCURRENCY = 3      # Parallel LLM enrichment calls (saves ~60% time)
 
 # ── Freshness filter ──
 # Only process articles published within the last N hours.
-# For hourly cron: 3h gives a safe margin. For first-run seeding: use --max-age 168 (7d).
-ARTICLE_MAX_AGE_HOURS = 3
+# For 2h cron: 4h gives safe overlap. For first-run seeding: use --max-age 168 (7d).
+ARTICLE_MAX_AGE_HOURS = 4
 
 # ── Content fetching & extraction ──
 CONTENT_MAX_LENGTH = 10000       # Max chars to store in the `content` column (Markdown)
-CONTENT_SNIPPET_FOR_LLM = 3000  # Max content chars sent to LLM for summarization
+CONTENT_SNIPPET_FOR_LLM = 6000  # Max content chars sent to LLM for summarization
 CONTENT_FETCH_CONCURRENCY = 5   # Parallel content page fetches
 CONTENT_FETCH_TIMEOUT = 20      # Seconds per content page fetch
 LLM_EXTRACT_MAX_INPUT = 12000   # Max chars of cleaned HTML to send to LLM extractor
@@ -63,8 +64,8 @@ DEFAULT_USER_AGENT = (
 )
 
 # Retry configuration for transient failures
-FETCH_MAX_RETRIES = 2            # Total attempts (was 3 — faster fail)
-FETCH_RETRY_BACKOFF = 1.5        # Exponential backoff base (was 2.0)
+FETCH_MAX_RETRIES = 1            # Total attempts (was 2 — fail fast)
+FETCH_RETRY_BACKOFF = 1.0        # Exponential backoff base (was 1.5)
 
 # Jina content fallback: fetch full text via Jina when snippet is shorter than this
 JINA_SNIPPET_MIN_LENGTH = 80     # Characters
@@ -114,19 +115,10 @@ TIER_1_SOURCES: list[SourceConfig] = [
         tier=SourceTier.TIER_1_OFFICIAL,
         category="AI",
     ),
-    SourceConfig(
-        name="Anthropic (Claude Blog)",
-        # Anthropic doesn't serve a standard RSS; use community-maintained mirror
-        url="https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_claude.xml",
-        tier=SourceTier.TIER_1_OFFICIAL,
-        category="AI",
-    ),
-    SourceConfig(
-        name="Anthropic Research",
-        url="https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_research.xml",
-        tier=SourceTier.TIER_1_OFFICIAL,
-        category="Research",
-    ),
+    # Anthropic blogs — disabled: community RSS mirrors consistently timeout
+    # Re-enable when official RSS feeds become available
+    # SourceConfig(name="Anthropic (Claude Blog)", url="...", tier=SourceTier.TIER_1_OFFICIAL, category="AI"),
+    # SourceConfig(name="Anthropic Research", url="...", tier=SourceTier.TIER_1_OFFICIAL, category="Research"),
     SourceConfig(
         name="Google DeepMind",
         url="https://deepmind.google/blog/rss.xml",
@@ -139,12 +131,8 @@ TIER_1_SOURCES: list[SourceConfig] = [
         tier=SourceTier.TIER_1_OFFICIAL,
         category="AI",
     ),
-    SourceConfig(
-        name="Hugging Face Blog",
-        url="https://huggingface.co/blog/feed.xml",
-        tier=SourceTier.TIER_1_OFFICIAL,
-        category="AI",
-    ),
+    # Hugging Face Blog — disabled: consistently times out (Cloudflare blocks)
+    # SourceConfig(name="Hugging Face Blog", url="https://huggingface.co/blog/feed.xml", tier=SourceTier.TIER_1_OFFICIAL, category="AI"),
     SourceConfig(
         name="NVIDIA Blog (AI)",
         url="https://blogs.nvidia.com/blog/category/deep-learning/feed/",
@@ -167,12 +155,8 @@ TIER_2_SOURCES: list[SourceConfig] = [
         tier=SourceTier.TIER_2_MEDIA,
         category="AI",
     ),
-    SourceConfig(
-        name="The Verge (AI)",
-        url="https://www.theverge.com/rss/artificial-intelligence/index.xml",
-        tier=SourceTier.TIER_2_MEDIA,
-        category="AI",
-    ),
+    # The Verge — disabled: RSS returns 0 entries (format changed?)
+    # SourceConfig(name="The Verge (AI)", url="https://www.theverge.com/rss/artificial-intelligence/index.xml", tier=SourceTier.TIER_2_MEDIA, category="AI"),
     SourceConfig(
         name="VentureBeat (AI)",
         url="https://venturebeat.com/category/ai/feed/",
@@ -208,32 +192,17 @@ TIER_3_SOURCES: list[SourceConfig] = [
         source_type="hn_api",
         category="AI",
     ),
-    SourceConfig(
-        name="Reddit r/LocalLLaMA",
-        url="https://www.reddit.com/r/LocalLLaMA/new/.rss",
-        tier=SourceTier.TIER_3_COMMUNITY,
-        source_type="rss",           # RSS — JSON API returns 403
-        category="LLM",
-    ),
-    SourceConfig(
-        name="Reddit r/MachineLearning",
-        url="https://www.reddit.com/r/MachineLearning/new/.rss",
-        tier=SourceTier.TIER_3_COMMUNITY,
-        source_type="rss",           # RSS — JSON API returns 403
-        category="AI",
-    ),
+    # Reddit — disabled: RSS consistently returns 403/timeout (aggressive bot blocking)
+    # SourceConfig(name="Reddit r/LocalLLaMA", url="https://www.reddit.com/r/LocalLLaMA/new/.rss", tier=SourceTier.TIER_3_COMMUNITY, source_type="rss", category="LLM"),
+    # SourceConfig(name="Reddit r/MachineLearning", url="https://www.reddit.com/r/MachineLearning/new/.rss", tier=SourceTier.TIER_3_COMMUNITY, source_type="rss", category="AI"),
     SourceConfig(
         name="Simon Willison's Weblog",
         url="https://simonwillison.net/atom/entries/",
         tier=SourceTier.TIER_3_COMMUNITY,
         category="AI",
     ),
-    SourceConfig(
-        name="Lil'Log (Lilian Weng)",
-        url="https://lilianweng.github.io/index.xml",
-        tier=SourceTier.TIER_3_COMMUNITY,
-        category="AI",
-    ),
+    # Lil'Log — disabled: connection error (site blocks non-browser clients)
+    # SourceConfig(name="Lil'Log (Lilian Weng)", url="https://lilianweng.github.io/index.xml", tier=SourceTier.TIER_3_COMMUNITY, category="AI"),
     SourceConfig(
         name="Last Week in AI",
         url="https://lastweekin.ai/feed",

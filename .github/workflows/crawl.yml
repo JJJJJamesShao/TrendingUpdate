@@ -9,11 +9,11 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: "Max articles to enrich (default 50)"
+        description: "Max articles to enrich (default 30)"
         required: false
-        default: "50"
+        default: "30"
       max_age:
-        description: "Max article age in hours (0 = default 3h)"
+        description: "Max article age in hours (0 = default 4h)"
         required: false
         default: "0"
       skip_cluster:
@@ -29,7 +29,7 @@ jobs:
   crawl:
     name: Crawl → Deduplicate → Enrich → Persist
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       # ── 1. Checkout code ─────────────────────────────────────
@@ -77,7 +77,7 @@ jobs:
         run: |
           python main.py \
             --skip-cluster \
-            --limit ${{ github.event.inputs.limit || '50' }} \
+            --limit ${{ github.event.inputs.limit || '30' }} \
             --max-age ${{ github.event.inputs.max_age || '0' }}
 
       # ── 6. Summary ──────────────────────────────────────────

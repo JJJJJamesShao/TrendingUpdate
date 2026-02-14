@@ -1,234 +1,203 @@
 # Content Format Specification
-> **Version**: 1.0.0
+> **Version**: 2.0.0
 > **Applies to**: `news_items.content` column in Supabase (PostgreSQL)
 
 ## Overview
 
-The `content` field stores the **full article text** extracted from the original source,
-formatted as **Markdown** with embedded image references. This document defines the
-format contract between the backend crawler (TrendCraw) and the frontend renderer.
+The `content` field stores an **LLM-generated structured editorial summary** of the
+original article — NOT the raw article text. This design choice:
+
+- **Reduces reading time**: Section-based digest vs. wall-of-text originals
+- **Improves SEO**: Clean, structured content with proper headings
+- **Saves storage**: Summaries are 500–1500 chars vs. 5000–10000 raw chars
+- **Consistent quality**: Every article follows the same editorial format
 
 ---
 
-## 1. Text Format: Markdown
+## 1. Content Format: Structured Markdown
 
-All content is stored as standard **CommonMark Markdown**. The frontend should use a
-Markdown renderer (e.g., `react-markdown`, `marked`, `markdown-it`) to display it.
-
-### Supported Elements
-
-| Element | Markdown Syntax | Example |
-|---------|----------------|---------|
-| Heading | `## Title` | `## Key Findings` |
-| Paragraph | Plain text block | `OpenAI announced a new model today...` |
-| Bold | `**text**` | `**important**` |
-| Italic | `*text*` | `*emphasis*` |
-| Link | `[text](url)` | `[official blog](https://openai.com/blog)` |
-| **Image** | `![alt](url)` | `![GPT-4o architecture](https://cdn.openai.com/img.jpg)` |
-| Bullet list | `- item` | `- Improved reasoning` |
-| Numbered list | `1. item` | `1. First step` |
-| Code | `` `code` `` | `` `transformer` `` |
-| Code block | ` ```lang ... ``` ` | Fenced code blocks |
-| Blockquote | `> text` | `> According to the paper...` |
-
----
-
-## 2. Image Format
-
-### 2.1 Storage Format
-
-Images are stored as **standard Markdown image references** pointing to the **original
-source URL** (hotlinked):
+Every `content` field follows this section template (LLM adapts as needed):
 
 ```markdown
-![alt text](https://example.com/path/to/image.jpg)
+## Overview
+What is this about? Why should readers care? (2-3 sentences)
+
+## Key Highlights
+- Most important takeaway #1
+- Key metric or benchmark result
+- Notable quote or announcement
+- Additional detail
+
+## Technical Details
+(For research/technical content — omitted for business news)
+Architecture, methodology, key innovations, performance metrics
+
+## Impact & Significance
+What this means for the AI industry and practitioners.
 ```
 
-#### Components
+### Content Characteristics
 
-| Part | Description | Example |
-|------|-------------|---------|
-| `alt text` | Image description (from HTML `alt` attribute) | `GPT-4o benchmark results` |
-| `url` | **Absolute** URL to the original image on the source website | `https://cdn.openai.com/research/img/benchmark.png` |
-
-### 2.2 URL Characteristics
-
-- All image URLs are **absolute** (protocol + domain + path)
-- Relative URLs are resolved during extraction using the article's source URL
-- Common image CDN domains: `cdn.openai.com`, `wp-content/uploads/...`, `cdn.arstechnica.net`, etc.
-- Formats: `.jpg`, `.png`, `.webp`, `.gif`, `.svg`
-
-### 2.3 Edge Cases
-
-| Case | Behavior |
-|------|----------|
-| Image has no `alt` text | Stored as `![](url)` (empty alt) |
-| Image uses `data-src` (lazy load) | May not be captured (limitation of static HTML parsing) |
-| Image is a Base64 data URI | Stripped during extraction (too large for storage) |
-| Image behind authentication | URL preserved but may return 403 when rendered |
-| SVG inline | Stripped during HTML cleaning (not stored) |
+| Property | Value |
+|----------|-------|
+| Format | CommonMark Markdown |
+| Language | English |
+| Length | 500 – 1,500 characters |
+| Sections | 2–4 `##` headings |
+| Images | **None** (summaries are text-only) |
+| Links | Minimal (original article URL in `original_url` column) |
 
 ---
 
-## 3. Content Extraction Pipeline
+## 2. Summary Field
 
-Content is extracted through a multi-strategy pipeline. Each strategy has different
-image preservation capabilities:
+The `summary` field stores a **2-3 sentence executive summary** for use on article
+cards, list views, and meta descriptions.
 
-| Priority | Strategy | Images Preserved | Format |
-|----------|----------|-----------------|--------|
-| S1 | Heuristic HTML isolation + html2text | **Yes** `![alt](url)` | Markdown |
-| S2 | trafilatura (smart extraction) | No (plain text) | Text |
-| S3 | html2text on full cleaned page | **Yes** `![alt](url)` | Markdown |
-| S4 | LLM extraction (MiniMax) | **Yes** (prompt-specified) | Markdown |
-| Fallback | RSS snippet | No | Plain text |
+```
+OpenAI has released GPT-5, featuring major improvements in mathematical reasoning
+and code generation. The model achieves 92.4% on the MATH benchmark, an 8.2%
+improvement over GPT-4o.
+```
 
-The pipeline uses **image-aware comparison**: when S1 finds images, it is strongly
-preferred over S2 even if S2 has more text content.
+| Property | Value |
+|----------|-------|
+| Format | Plain text (no Markdown) |
+| Length | 100 – 300 characters |
+| Purpose | Card preview, `<meta description>`, social sharing |
 
 ---
 
-## 4. Frontend Rendering Guide
+## 3. Editorial Screening
 
-### 4.1 Basic Rendering (React + react-markdown)
+Every article passes through an **LLM editorial filter** before publication.
+Articles are REJECTED if they are:
+
+- User questions / community discussions (Ask HN, Reddit Q&A)
+- Job postings, hiring threads
+- Personal opinions without substance
+- Vague rumors, unverified speculation
+- Routine minor updates or changelogs
+- Off-topic content (not AI/ML/tech)
+
+Rejected articles are NOT stored in the database.
+
+---
+
+## 4. Database Schema Reference
+
+```sql
+-- Key columns in news_items
+content       TEXT    NOT NULL  -- Structured editorial summary (Markdown sections)
+summary       TEXT    NOT NULL  -- 2-3 sentence executive summary (plain text)
+original_url  TEXT    UNIQUE    -- Link to original article
+category      TEXT              -- AI | LLM | Hardware | Research | Industry
+is_processed  BOOLEAN           -- true = LLM enriched, false = fallback content
+```
+
+### Invariants (enforced by pipeline)
+
+1. **No NULL content**: Every row has a non-empty `content` value
+2. **No NULL summary**: Every row has a non-empty `summary` value
+3. **No "General" category**: Off-topic articles are rejected, not stored
+
+---
+
+## 5. Frontend Rendering Guide
+
+### 5.1 Content Rendering (React + react-markdown)
 
 ```tsx
 import ReactMarkdown from 'react-markdown';
 
 function ArticleContent({ content }: { content: string }) {
   return (
-    <article className="prose prose-lg max-w-none">
-      <ReactMarkdown
-        components={{
-          img: ({ src, alt }) => (
-            <ArticleImage src={src || ''} alt={alt || ''} />
-          ),
-        }}
-      >
-        {content}
-      </ReactMarkdown>
+    <article className="prose prose-lg max-w-none dark:prose-invert">
+      <ReactMarkdown>{content}</ReactMarkdown>
     </article>
   );
 }
 ```
 
-### 4.2 Image Component with Error Handling (Plan D)
+### 5.2 Article Card (uses `summary`)
 
 ```tsx
-'use client';
-
-import { useState } from 'react';
-import Image from 'next/image';
-
-interface ArticleImageProps {
-  src: string;
-  alt: string;
-}
-
-export function ArticleImage({ src, alt }: ArticleImageProps) {
-  const [error, setError] = useState(false);
-  const [loading, setLoading] = useState(true);
-
-  if (error) {
-    return (
-      <div className="my-4 flex items-center justify-center rounded-lg
-                      bg-gray-100 dark:bg-gray-800 p-8 text-sm text-gray-500">
-        <span>{alt || 'Image unavailable'}</span>
-      </div>
-    );
-  }
-
+function ArticleCard({ article }: { article: NewsItem }) {
   return (
-    <figure className="my-6">
-      {loading && (
-        <div className="animate-pulse rounded-lg bg-gray-200 dark:bg-gray-700 h-64 w-full" />
-      )}
-      <img
-        src={src}
-        alt={alt}
-        loading="lazy"
-        onLoad={() => setLoading(false)}
-        onError={() => { setError(true); setLoading(false); }}
-        className={`rounded-lg w-full ${loading ? 'hidden' : 'block'}`}
-      />
-      {alt && !loading && (
-        <figcaption className="mt-2 text-center text-sm text-gray-500">
-          {alt}
-        </figcaption>
-      )}
-    </figure>
+    <div className="border rounded-lg p-4 hover:shadow-md transition">
+      <h3 className="font-semibold text-lg">{article.title}</h3>
+      <p className="text-gray-600 mt-2 text-sm">{article.summary}</p>
+      <div className="mt-3 flex items-center gap-2 text-xs text-gray-400">
+        <span>{article.source_name}</span>
+        <span>·</span>
+        <time>{article.published_at}</time>
+        <span className="ml-auto px-2 py-0.5 bg-blue-100 text-blue-700 rounded">
+          {article.category}
+        </span>
+      </div>
+    </div>
   );
 }
 ```
 
-### 4.3 Optional: Image Proxy for Production
-
-For production deployments, consider routing images through a free proxy to avoid
-hotlinking issues and enable optimization:
+### 5.3 SEO Metadata
 
 ```tsx
-function proxyImageUrl(originalUrl: string): string {
-  // wsrv.nl — free, open-source image proxy with CDN
-  return `https://wsrv.nl/?url=${encodeURIComponent(originalUrl)}&w=800&output=webp`;
+export async function generateMetadata({ params }) {
+  const article = await getArticle(params.id);
+  return {
+    title: article.title,
+    description: article.summary,  // Uses the summary field
+    openGraph: {
+      title: article.title,
+      description: article.summary,
+      type: 'article',
+      publishedTime: article.published_at,
+    },
+  };
 }
-
-// Usage in ArticleImage component:
-<img src={proxyImageUrl(src)} alt={alt} loading="lazy" ... />
 ```
-
-Benefits of proxy approach:
-- Bypasses `Referer` restrictions on hotlinked images
-- Automatic WebP conversion (smaller file size)
-- Resize on the fly (`&w=800`)
-- CDN caching (faster load times)
-- No storage cost
-
----
-
-## 5. Database Schema Reference
-
-```sql
--- Relevant columns in news_items table
-content     TEXT        -- Markdown article body (may include ![alt](url) images)
-summary     TEXT        -- LLM-generated summary (plain text, no images)
-original_url TEXT       -- Link to original article on source website
-```
-
-### Content Size
-
-| Metric | Value |
-|--------|-------|
-| Max stored length | 10,000 characters |
-| Typical article | 3,000 – 8,000 characters |
-| Images per article | 0 – 10 (typically 1-3) |
 
 ---
 
 ## 6. Example Content
 
-Below is a representative example of stored content:
+### Stored in `content` column:
 
 ```markdown
-## OpenAI Launches GPT-5 with Enhanced Reasoning
+## Overview
 
-![GPT-5 announcement banner](https://cdn.openai.com/assets/gpt5-hero.jpg)
+OpenAI has launched GPT-5, the successor to GPT-4o, featuring substantial
+improvements in mathematical reasoning, code generation, and multimodal
+understanding. The model is available immediately for ChatGPT Plus subscribers.
 
-OpenAI today announced GPT-5, the latest iteration of its flagship language model,
-featuring significant improvements in mathematical reasoning and code generation.
+## Key Highlights
 
-The new model achieves **state-of-the-art performance** on multiple benchmarks:
+- **MATH benchmark**: 92.4% accuracy (+8.2% over GPT-4o)
+- **HumanEval**: 96.1% (+4.3%), setting a new state-of-the-art for code generation
+- **MMLU**: 91.8% (+2.1%), demonstrating broad knowledge improvements
+- Native multimodal support with improved image understanding
+- 2x context window (256K tokens) compared to GPT-4o
 
-- MATH benchmark: 92.4% (+8.2% over GPT-4o)
-- HumanEval: 96.1% (+4.3% over GPT-4o)
-- MMLU: 91.8% (+2.1% over GPT-4o)
+## Technical Details
 
-![Benchmark comparison chart](https://cdn.openai.com/research/gpt5-benchmarks.png)
+GPT-5 employs a refined Mixture-of-Experts (MoE) architecture with improved
+routing efficiency. Training used a new curriculum learning approach that
+prioritizes reasoning-heavy tasks in later training stages. The model also
+introduces "chain-of-thought distillation" for faster inference.
 
-### Availability
+## Impact & Significance
 
-GPT-5 is available today for [ChatGPT Plus](https://chat.openai.com) subscribers
-and will roll out to API users over the next two weeks.
+GPT-5 narrows the gap with specialized models on mathematical reasoning while
+maintaining strong general-purpose capabilities. The expanded context window
+and improved code generation make it particularly relevant for enterprise
+development workflows and research applications.
+```
 
-> "This represents our most capable model to date," said Sam Altman,
-> CEO of OpenAI, during the announcement.
+### Stored in `summary` column:
+
+```
+OpenAI launched GPT-5 with major improvements in math reasoning (92.4% MATH
+benchmark) and code generation (96.1% HumanEval). Available now for ChatGPT
+Plus subscribers with a 256K context window.
 ```

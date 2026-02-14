@@ -98,12 +98,17 @@ async def crawl_and_process(
         return []
 
     # ── Step 1b: Freshness filter — discard old articles ──────
+    # ArXiv papers are exempt: they publish in daily batches (~24-36h ago)
+    # and the ArXiv fetcher already applies its own 48h cutoff.
     age_hours = max_age_hours if max_age_hours > 0 else ARTICLE_MAX_AGE_HOURS
     cutoff = datetime.now(timezone.utc) - timedelta(hours=age_hours)
     before_filter = len(raw_articles)
-    raw_articles = [a for a in raw_articles if a.published_at >= cutoff]
+    raw_articles = [
+        a for a in raw_articles
+        if a.published_at >= cutoff or "arxiv" in a.source_name.lower()
+    ]
     log.info(
-        "Freshness filter (max %dh): %d → %d (discarded %d old articles)",
+        "Freshness filter (max %dh, ArXiv exempt): %d → %d (discarded %d old articles)",
         age_hours, before_filter, len(raw_articles),
         before_filter - len(raw_articles),
     )
@@ -151,14 +156,10 @@ async def crawl_and_process(
     elif not MINIMAX_API_KEY:
         log.info(">>> STEP 2c: LLM clustering SKIPPED (no MINIMAX_API_KEY)")
 
-    # ── Step 2d: Apply enrich limit (before expensive operations) ──
-    if enrich_limit > 0 and len(articles) > enrich_limit:
-        log.info("Limiting to %d / %d articles (enrich_limit=%d)",
-                 enrich_limit, len(articles), enrich_limit)
-        articles = articles[:enrich_limit]
-
-    # ── Step 2e: Fetch full article content ────────────────────
-    log.info(">>> STEP 2e: Fetching full article content...")
+    # ── Step 2d: Fetch full article content ─────────────────────
+    # Fetch content for ALL articles first. ArXiv papers already have
+    # full_content (abstract) and are automatically skipped.
+    log.info(">>> STEP 2d: Fetching full article content...")
     connector = aiohttp.TCPConnector(limit=10)
     async with aiohttp.ClientSession(
         connector=connector,
@@ -166,9 +167,35 @@ async def crawl_and_process(
     ) as session:
         await fetch_contents_batch(articles, session)
 
-    # ── Step 3: Content enrichment ─────────────────────────────
+    # ── Step 2e: Content quality gate ─────────────────────────
+    # Quality-first policy: ONLY publish articles where we have the
+    # original text to produce a proper summary.
+    before_content_gate = len(articles)
+    articles = [a for a in articles if a.full_content and len(a.full_content.strip()) > 100]
+    content_dropped = before_content_gate - len(articles)
+    if content_dropped:
+        log.info(
+            "Content gate: dropped %d/%d articles without original text",
+            content_dropped, before_content_gate,
+        )
+
+    if not articles:
+        log.warning("No articles with full content. Pipeline ending early.")
+        return []
+
+    # ── Step 2f: Apply enrich limit (AFTER content gate) ──────
+    # Now we only count articles that actually have content.
+    if enrich_limit > 0 and len(articles) > enrich_limit:
+        log.info("Limiting to %d / %d articles with content (enrich_limit=%d)",
+                 enrich_limit, len(articles), enrich_limit)
+        articles = articles[:enrich_limit]
+
+    # ── Step 3: Editorial screening + structured summary ──────
+    # The LLM now does BOTH filtering (is_newsworthy?) and content
+    # generation (structured summary) in one call.  Non-newsworthy
+    # articles (Ask HN, Reddit Q&A, off-topic) are rejected here.
     if not skip_enrichment and MINIMAX_API_KEY:
-        log.info(">>> STEP 3: Content enrichment (MiniMax LLM)...")
+        log.info(">>> STEP 3: Editorial screening + content generation (MiniMax LLM)...")
         connector = aiohttp.TCPConnector(limit=5)
         async with aiohttp.ClientSession(
             connector=connector,
@@ -185,33 +212,29 @@ async def crawl_and_process(
                 source_name=a.source_name,
                 published_at=a.published_at,
                 category=a.category,
-                summary=None,
-                content=a.full_content or a.content_snippet or None,
+                summary=a.title,
+                content=a.full_content or a.content_snippet or a.title,
                 is_processed=False,
             )
             for a in articles
         ]
 
-    # ── Step 4: Filter out non-AI content ─────────────────────
-    # Articles categorized as "General" by the LLM are off-topic noise
-    # (e.g., HN posts about gaming, email tools, etc.)
-    before_filter = len(results)
-    results = [r for r in results if r.category != "General"]
-    general_removed = before_filter - len(results)
-    if general_removed:
-        log.info("Category filter: removed %d 'General' articles, %d remaining",
-                 general_removed, len(results))
+    # ── Step 4: Quality gate — no empty content allowed ───────
+    before_gate = len(results)
+    results = [r for r in results if r.content and len(r.content.strip()) > 20]
+    empty_removed = before_gate - len(results)
+    if empty_removed:
+        log.info("Quality gate: removed %d articles with empty content", empty_removed)
 
     # ── Summary ────────────────────────────────────────────────
     elapsed = time.time() - start
     processed_count = sum(1 for r in results if r.is_processed)
-    content_count = sum(1 for r in results if r.content)
 
     log.info("=" * 60)
     log.info("  TrendCraw Pipeline — Complete")
     log.info("  Raw fetched  : %d", len(raw_articles))
     log.info("  After dedup  : %d", len(articles))
-    log.info("  With content : %d / %d", content_count, len(results))
+    log.info("  Published    : %d", len(results))
     log.info("  Enriched     : %d / %d", processed_count, len(results))
     log.info("  Elapsed      : %.1fs", elapsed)
     log.info("=" * 60)
