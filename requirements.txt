@@ -21,6 +21,7 @@ psycopg2-binary>=2.9.0      # PostgreSQL adapter for Supabase
 # --- Content Extraction ---
 trafilatura>=1.8.0          # Smart article extraction from HTML (free, local)
 html2text>=2024.2.0         # HTML → Markdown converter (preserves images & links)
+markdown>=3.5.0             # Markdown → HTML for LLM content (prose-ready fragments)
 
 # --- Utilities ---
 python-dotenv>=1.0.0        # Load .env files for local development

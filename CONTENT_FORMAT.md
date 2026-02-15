@@ -1,51 +1,55 @@
 # Content Format Specification
-> **Version**: 2.0.0
+> **Version**: 2.1.0
 > **Applies to**: `news_items.content` column in Supabase (PostgreSQL)
 
 ## Overview
 
 The `content` field stores an **LLM-generated structured editorial summary** of the
-original article — NOT the raw article text. This design choice:
+original article — NOT the raw article text. Stored as an **HTML fragment** so the
+frontend can inject it into the DOM and style it with Tailwind Typography (`prose`).
 
 - **Reduces reading time**: Section-based digest vs. wall-of-text originals
 - **Improves SEO**: Clean, structured content with proper headings
 - **Saves storage**: Summaries are 500–1500 chars vs. 5000–10000 raw chars
 - **Consistent quality**: Every article follows the same editorial format
 
+**Pipeline**: LLM outputs **Markdown** (with `####` for section headings). The Python
+crawler converts Markdown → HTML with the `markdown` library and stores the HTML
+fragment in `content`. No `<html>`, `<body>`, or wrapper `<div>` — only content-level tags.
+
 ---
 
-## 1. Content Format: Structured Markdown
+## 1. Content Format: HTML Fragment (Stored in DB)
 
-Every `content` field follows this section template (LLM adapts as needed):
+The **database** stores **HTML**. The LLM produces **Markdown**; the crawler converts
+it to HTML before insert. Section headings use `####` in Markdown so the converter
+outputs `<h4>` (best fit for `prose-sm` on the frontend).
 
-```markdown
-## Overview
-What is this about? Why should readers care? (2-3 sentences)
+### Allowed HTML Tags (frontend renders only these)
 
-## Key Highlights
-- Most important takeaway #1
-- Key metric or benchmark result
-- Notable quote or announcement
-- Additional detail
-
-## Technical Details
-(For research/technical content — omitted for business news)
-Architecture, methodology, key innovations, performance metrics
-
-## Impact & Significance
-What this means for the AI industry and practitioners.
-```
+| Tag | Purpose | Example |
+|-----|---------|--------|
+| `<p>` | Paragraph | `<p>This is a paragraph.</p>` |
+| `<h4>` | Section heading | `<h4>Key Finding</h4>` |
+| `<strong>` | Bold | `<strong>important</strong>` |
+| `<em>` | Italic | `<em>Nature</em>` |
+| `<ul>`, `<li>` | Unordered list | `<ul><li>Point one</li></ul>` |
+| `<ol>`, `<li>` | Ordered list | `<ol><li>First</li></ol>` |
+| `<a href="...">` | Link | `<a href="https://...">link text</a>` |
+| `<blockquote>` | Quote | `<blockquote>Quote here</blockquote>` |
+| `<code>` | Inline code | `<code>model.train()</code>` |
 
 ### Content Characteristics
 
 | Property | Value |
 |----------|-------|
-| Format | CommonMark Markdown |
+| Stored format | HTML fragment (no wrapper tags) |
+| Source | LLM Markdown → Python `markdown.markdown()` |
 | Language | English |
-| Length | 500 – 1,500 characters |
-| Sections | 2–4 `##` headings |
+| Length | 500 – 1,500 characters (pre-conversion) |
+| Sections | 2–4 `####` in Markdown → `<h4>` in HTML |
 | Images | **None** (summaries are text-only) |
-| Links | Minimal (original article URL in `original_url` column) |
+| Links | Minimal (e.g. original article in `original_url`) |
 
 ---
 
@@ -88,7 +92,7 @@ Rejected articles are NOT stored in the database.
 
 ```sql
 -- Key columns in news_items
-content       TEXT    NOT NULL  -- Structured editorial summary (Markdown sections)
+content       TEXT    NOT NULL  -- Structured editorial summary (HTML fragment; see allowed tags above)
 summary       TEXT    NOT NULL  -- 2-3 sentence executive summary (plain text)
 original_url  TEXT    UNIQUE    -- Link to original article
 category      TEXT              -- AI | LLM | Hardware | Research | Industry
@@ -105,19 +109,25 @@ is_processed  BOOLEAN           -- true = LLM enriched, false = fallback content
 
 ## 5. Frontend Rendering Guide
 
-### 5.1 Content Rendering (React + react-markdown)
+### 5.1 Content Rendering (HTML + Tailwind Typography)
+
+`content` is stored as HTML. Inject it into the DOM and use Tailwind Typography
+(`prose`) to style standard HTML tags. **Do not** use ReactMarkdown — the backend
+already stores HTML.
 
 ```tsx
-import ReactMarkdown from 'react-markdown';
-
 function ArticleContent({ content }: { content: string }) {
   return (
-    <article className="prose prose-lg max-w-none dark:prose-invert">
-      <ReactMarkdown>{content}</ReactMarkdown>
-    </article>
+    <article
+      className="prose prose-sm max-w-none dark:prose-invert"
+      dangerouslySetInnerHTML={{ __html: content }}
+    />
   );
 }
 ```
+
+Only the allowed tags (p, h4, strong, em, ul, ol, li, a, blockquote, code) are
+produced by the crawler; prose styles them (paragraphs, headings, lists, links, etc.).
 
 ### 5.2 Article Card (uses `summary`)
 
@@ -162,36 +172,27 @@ export async function generateMetadata({ params }) {
 
 ## 6. Example Content
 
-### Stored in `content` column:
+### Stored in `content` column (HTML fragment):
 
-```markdown
-## Overview
-
-OpenAI has launched GPT-5, the successor to GPT-4o, featuring substantial
+```html
+<p>OpenAI has launched GPT-5, the successor to GPT-4o, featuring substantial
 improvements in mathematical reasoning, code generation, and multimodal
-understanding. The model is available immediately for ChatGPT Plus subscribers.
-
-## Key Highlights
-
-- **MATH benchmark**: 92.4% accuracy (+8.2% over GPT-4o)
-- **HumanEval**: 96.1% (+4.3%), setting a new state-of-the-art for code generation
-- **MMLU**: 91.8% (+2.1%), demonstrating broad knowledge improvements
-- Native multimodal support with improved image understanding
-- 2x context window (256K tokens) compared to GPT-4o
-
-## Technical Details
-
-GPT-5 employs a refined Mixture-of-Experts (MoE) architecture with improved
+understanding. The model is available immediately for ChatGPT Plus subscribers.</p>
+<h4>Key Highlights</h4>
+<ul>
+<li><strong>MATH benchmark</strong>: 92.4% accuracy (+8.2% over GPT-4o)</li>
+<li><strong>HumanEval</strong>: 96.1% (+4.3%), setting a new state-of-the-art for code generation</li>
+<li><strong>MMLU</strong>: 91.8% (+2.1%), demonstrating broad knowledge improvements</li>
+<li>Native multimodal support with improved image understanding</li>
+<li>2x context window (256K tokens) compared to GPT-4o</li>
+</ul>
+<h4>Technical Details</h4>
+<p>GPT-5 employs a refined Mixture-of-Experts (MoE) architecture with improved
 routing efficiency. Training used a new curriculum learning approach that
-prioritizes reasoning-heavy tasks in later training stages. The model also
-introduces "chain-of-thought distillation" for faster inference.
-
-## Impact & Significance
-
-GPT-5 narrows the gap with specialized models on mathematical reasoning while
-maintaining strong general-purpose capabilities. The expanded context window
-and improved code generation make it particularly relevant for enterprise
-development workflows and research applications.
+prioritizes reasoning-heavy tasks in later training stages.</p>
+<h4>Impact & Significance</h4>
+<p>GPT-5 narrows the gap with specialized models on mathematical reasoning while
+maintaining strong general-purpose capabilities.</p>
 ```
 
 ### Stored in `summary` column:

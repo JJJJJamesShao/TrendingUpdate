@@ -16,10 +16,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-import aiohttp
-from rapidfuzz import fuzz
-
 import asyncio
+
+import aiohttp
+import markdown
+from rapidfuzz import fuzz
 
 from config import (
     DEDUP_SIMILARITY_THRESHOLD,
@@ -245,14 +246,14 @@ No explanation, no markdown, just the JSON array."""
 # ===================================================================
 
 def _generate_fallback_content(article: RawArticle, summary: str | None) -> str:
-    """Generate minimal structured content when LLM enrichment fails."""
-    parts = [f"## Overview\n\n{article.title}"]
+    """Generate minimal Markdown when LLM enrichment fails. Use #### for section headings (→ <h4>)."""
+    parts = [f"#### Overview\n\n{article.title}"]
     if summary:
         parts.append(f"\n\n{summary}")
     elif article.content_snippet:
         parts.append(f"\n\n{article.content_snippet[:500]}")
     parts.append(
-        f"\n\n## Source\n\n"
+        f"\n\n#### Source\n\n"
         f"- **{article.source_name}** — Published {article.published_at.strftime('%Y-%m-%d')}\n"
         f"- [Read original article]({article.url})"
     )
@@ -272,30 +273,30 @@ URL: {article.url}
 {content}
 ────────────────
 
-Produce a comprehensive research summary with the following Markdown sections:
+Produce a comprehensive research summary in Markdown. Use #### (four hashes) for section headings so they render as subheadings.
 
-## Problem Statement
+#### Problem Statement
 What problem does this paper address? What gap in existing research does it fill? (2-3 sentences)
 
-## Proposed Approach
+#### Proposed Approach
 What method, model, or framework do the authors propose? Describe the core idea clearly. (3-5 sentences)
 
-## Key Innovations
+#### Key Innovations
 - What is novel about this work compared to prior art?
 - List 3-5 specific technical contributions
 
-## Methodology & Architecture
+#### Methodology & Architecture
 Describe the technical approach: model architecture, training procedure, datasets used, loss functions, or theoretical framework. Include specific numbers (parameters, layers, training steps) when available.
 
-## Results & Benchmarks
+#### Results & Benchmarks
 - Report ALL quantitative results mentioned in the abstract
 - Include benchmark names, metrics, and scores
 - Note comparisons with baselines or prior state-of-the-art
 
-## Significance & Implications
+#### Significance & Implications
 Why does this paper matter? What are the practical implications for the AI community?
 
-TARGET LENGTH: 1500-2500 characters. Be thorough and precise.
+TARGET LENGTH: 1500-2500 characters. Be thorough and precise. Use only standard Markdown: ####, **bold**, - lists, [links](url).
 
 ═══ RESPONSE FORMAT ═══
 Return ONLY valid JSON:
@@ -305,7 +306,7 @@ Return ONLY valid JSON:
   "category": "Research",
   "importance": 7,
   "summary": "2-3 sentence summary: what the paper proposes and its key result",
-  "content": "## Problem Statement\\n...\\n\\n## Proposed Approach\\n...\\n\\n..."
+  "content": "#### Problem Statement\\n...\\n\\n#### Proposed Approach\\n...\\n\\n..."
 }}
 
 If the paper is NOT about AI/ML (e.g., pure mathematics, biology without ML):
@@ -372,21 +373,23 @@ Write a DETAILED editorial summary based on ALL the content provided. The reader
 - Include every specific number, metric, benchmark, date, and direct quote
 - Do NOT fabricate or speculate beyond what the source material states
 
-Section structure:
+Section structure (use #### for section headings so they render as subheadings):
 
-## Overview
+#### Overview
 Comprehensive introduction: who, what, when, why. (3-5 sentences)
 
-## Key Highlights
+#### Key Highlights
 - 5-8 bullet points covering ALL major points from the original article
 - Include ALL specific numbers, metrics, benchmarks, dates, and direct quotes
 
-## Technical Details
+#### Technical Details
 (For technical content — skip ONLY for pure business news)
 Detailed coverage: architecture, methodology, performance metrics, key innovations
 
-## Impact & Significance
+#### Impact & Significance
 What this means for the AI industry, developers, researchers, and end users.
+
+Use only standard Markdown: ####, **bold**, - lists, [links](url). No HTML.
 
 ═══ RESPONSE FORMAT ═══
 Return ONLY valid JSON (no markdown fences, no reasoning):
@@ -396,7 +399,7 @@ Return ONLY valid JSON (no markdown fences, no reasoning):
   "category": "AI or LLM or Hardware or Research or Industry",
   "importance": 7,
   "summary": "2-3 sentence executive summary for the article card",
-  "content": "## Overview\\n...\\n\\n## Key Highlights\\n- ...\\n\\n..."
+  "content": "#### Overview\\n...\\n\\n#### Key Highlights\\n- ...\\n\\n..."
 }}
 
 If NOT publishable:
@@ -463,12 +466,15 @@ async def enrich_article(
             log.info("  → Rejected: %s", reason[:80])
             return None
 
-        content = result.get("content", "")
+        content_md = result.get("content", "")
         summary = result.get("summary", "")
 
         # Ensure content is not empty — fallback if LLM returned thin content
-        if not content or len(content.strip()) < 50:
-            content = _generate_fallback_content(article, summary)
+        if not content_md or len(content_md.strip()) < 50:
+            content_md = _generate_fallback_content(article, summary)
+
+        # Markdown → HTML fragment for frontend prose (no wrapper tags)
+        content = markdown.markdown(content_md)
 
         # Ensure summary is not empty
         if not summary:
@@ -487,6 +493,8 @@ async def enrich_article(
 
     # ── LLM call failed entirely — use fallback content ──
     log.warning("Enrichment failed for '%s' — generating fallback", article.title[:50])
+    fallback_md = _generate_fallback_content(article, None)
+    content = markdown.markdown(fallback_md)
     return ProcessedArticle(
         title=article.title,
         original_url=article.url,
@@ -494,7 +502,7 @@ async def enrich_article(
         published_at=article.published_at,
         category=article.category,
         summary=f"{article.title} — from {article.source_name}.",
-        content=_generate_fallback_content(article, None),
+        content=content,
         is_processed=False,
     )
 
