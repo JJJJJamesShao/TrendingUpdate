@@ -11,6 +11,7 @@ NOTE: Database config lives in TrendingUpdate/.env and is accessed via
 from __future__ import annotations
 
 import os
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from enum import IntEnum
 from dotenv import load_dotenv
@@ -87,6 +88,7 @@ class SourceTier(IntEnum):
     TIER_2_MEDIA = 2      # Tech News & Media
     TIER_3_COMMUNITY = 3  # Developer & Community
     TIER_4_RESEARCH = 4   # Papers & Research
+    TIER_5_DAILY_BLOGS = 5  # High-quality blogs (OPML); fetched only in daily run
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +233,67 @@ TIER_4_SOURCES: list[SourceConfig] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Aggregate all sources
+# Daily blog feeds (92 high-quality blogs from OPML) — fetched only when
+# FETCH_DAILY_FEEDS=1 or --daily-feeds (e.g. once per day 18:00–21:00 UTC).
+# ---------------------------------------------------------------------------
+OPML_PATH = os.path.join(os.path.dirname(__file__), "..", "emschwartz_rss_feed.opml")
+
+
+def _load_opml_sources(path: str) -> list[SourceConfig]:
+    """Parse OPML and return list of SourceConfig (RSS only). Normalizes http→https."""
+    if not os.path.isfile(path):
+        return []
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except ET.ParseError:
+        return []
+    # OPML 2.0: outline elements; xmlUrl in outline (or nested).
+    # Handle both <outline xmlUrl="..."> and nested <outline><outline xmlUrl="...">
+    configs: list[SourceConfig] = []
+    for elem in root.iter():
+        if elem.tag.endswith("outline"):
+            url = elem.get("xmlUrl") or elem.get("url")
+            if not url or not url.strip():
+                continue
+            url = url.strip()
+            if url.startswith("http://"):
+                url = "https://" + url[7:]
+            name = (elem.get("title") or elem.get("text") or "").strip() or url
+            configs.append(
+                SourceConfig(
+                    name=name[:80],
+                    url=url,
+                    tier=SourceTier.TIER_5_DAILY_BLOGS,
+                    source_type="rss",
+                    category="General",
+                )
+            )
+    return configs
+
+
+# Lazy load to avoid file I/O on import when not using daily feeds
+_DAILY_BLOG_SOURCES: list[SourceConfig] | None = None
+
+
+def get_daily_blog_sources() -> list[SourceConfig]:
+    """Load and return the 92 OPML blog sources (cached)."""
+    global _DAILY_BLOG_SOURCES
+    if _DAILY_BLOG_SOURCES is None:
+        _DAILY_BLOG_SOURCES = _load_opml_sources(OPML_PATH)
+    return _DAILY_BLOG_SOURCES
+
+
+def get_sources(include_daily_feeds: bool = False) -> list[SourceConfig]:
+    """Return sources to fetch. include_daily_feeds=True adds 92 OPML blogs (for daily run)."""
+    hot = TIER_1_SOURCES + TIER_2_SOURCES + TIER_3_SOURCES + TIER_4_SOURCES
+    if not include_daily_feeds:
+        return hot
+    return hot + get_daily_blog_sources()
+
+
+# ---------------------------------------------------------------------------
+# Aggregate: hot sources only (every 2h cron). Full = hot + daily blogs.
 # ---------------------------------------------------------------------------
 ALL_SOURCES: list[SourceConfig] = (
     TIER_1_SOURCES + TIER_2_SOURCES + TIER_3_SOURCES + TIER_4_SOURCES

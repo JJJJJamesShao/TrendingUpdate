@@ -70,6 +70,11 @@ Examples:
         metavar="HOURS",
         help="Only process articles from the last N hours (0 = use config default: 3h)",
     )
+    parser.add_argument(
+        "--daily-feeds",
+        action="store_true",
+        help="Include 92 OPML blog feeds (for daily run; otherwise hot sources only)",
+    )
     return parser.parse_args()
 
 
@@ -110,6 +115,7 @@ def run_full_pipeline(args: argparse.Namespace) -> int:
         skip_llm_cluster=args.skip_cluster,
         enrich_limit=args.limit,
         max_age_hours=args.max_age,
+        include_daily_feeds=args.daily_feeds,
     ))
 
     if not articles:
@@ -158,6 +164,7 @@ def run_dry_run(args: argparse.Namespace) -> int:
         skip_enrichment=skip_enrich,
         enrich_limit=args.limit,
         max_age_hours=args.max_age,
+        include_daily_feeds=args.daily_feeds,
     ))
 
     if not articles:
@@ -202,6 +209,9 @@ def run_dry_run(args: argparse.Namespace) -> int:
 def main() -> int:
     args = parse_args()
     start = time.time()
+    # Allow env override for GitHub Actions: FETCH_DAILY_FEEDS=1 for daily cron
+    if os.getenv("FETCH_DAILY_FEEDS", "").strip() in ("1", "true", "yes"):
+        args.daily_feeds = True
 
     try:
         if args.dry_run:

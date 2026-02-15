@@ -31,7 +31,7 @@ from typing import Any
 import aiohttp
 
 from config import (
-    ALL_SOURCES,
+    get_sources,
     MINIMAX_API_KEY,
     DEFAULT_USER_AGENT,
     MAX_CONCURRENT_REQUESTS,
@@ -59,6 +59,7 @@ async def crawl_and_process(
     skip_enrichment: bool = False,
     enrich_limit: int = 0,
     max_age_hours: int = 0,
+    include_daily_feeds: bool = False,
 ) -> list[ProcessedArticle]:
     """One-call interface: Fetch → Deduplicate → Summarize → Return.
 
@@ -74,23 +75,26 @@ async def crawl_and_process(
         skip_enrichment:  If True, skip LLM summarization (return unprocessed articles).
         enrich_limit:     If > 0, only enrich the first N articles (saves API quota).
         max_age_hours:    Override freshness filter (0 = use config default).
+        include_daily_feeds: If True, also fetch 92 OPML blog feeds (for daily run).
 
     Returns:
         List of ProcessedArticle ready for database insertion via .to_db_dict().
     """
     start = time.time()
+    sources = get_sources(include_daily_feeds=include_daily_feeds)
 
     log.info("=" * 60)
     log.info("  TrendCraw Pipeline — Starting")
-    log.info("  Sources: %d | URL dedup pool: %d | Title dedup pool: %d",
-             len(ALL_SOURCES),
+    log.info("  Sources: %d (%s) | URL dedup pool: %d | Title dedup pool: %d",
+             len(sources),
+             "hot+daily" if include_daily_feeds else "hot only",
              len(known_urls) if known_urls else 0,
              len(known_titles) if known_titles else 0)
     log.info("=" * 60)
 
     # ── Step 1: Fetch all sources ──────────────────────────────
-    log.info(">>> STEP 1: Fetching from %d sources...", len(ALL_SOURCES))
-    raw_articles = await fetch_all_sources(ALL_SOURCES)
+    log.info(">>> STEP 1: Fetching from %d sources...", len(sources))
+    raw_articles = await fetch_all_sources(sources)
     log.info("Fetched %d raw articles", len(raw_articles))
 
     if not raw_articles:

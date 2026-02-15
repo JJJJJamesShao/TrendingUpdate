@@ -1,11 +1,10 @@
 name: AI Nexus — Crawl & Enrich Pipeline
 
 on:
-  # Scheduled: every 2 hours (safe within free tier 2000 min/month)
   schedule:
+    # Every 2h. At 12:00 UTC we set FETCH_DAILY_FEEDS=1 (hot + 92 OPML blogs); else hot only.
     - cron: "0 */2 * * *"
 
-  # Manual trigger from GitHub UI (Actions tab → Run workflow)
   workflow_dispatch:
     inputs:
       limit:
@@ -21,6 +20,11 @@ on:
         required: false
         type: boolean
         default: true
+      daily_feeds:
+        description: "Include 92 OPML blog feeds (slower, use for full daily run)"
+        required: false
+        type: boolean
+        default: false
 
 env:
   PYTHON_VERSION: "3.12"
@@ -29,7 +33,8 @@ jobs:
   crawl:
     name: Crawl → Deduplicate → Enrich → Persist
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 10 min usually enough for hot-only; daily (107 sources) may need more
+    timeout-minutes: 25
 
     steps:
       # ── 1. Checkout code ─────────────────────────────────────
@@ -60,21 +65,20 @@ jobs:
       # ── 5. Run pipeline ─────────────────────────────────────
       - name: Run AI Nexus pipeline
         env:
-          # Database (Supabase)
           user: ${{ secrets.SUPABASE_DB_USER }}
           password: ${{ secrets.SUPABASE_DB_PASSWORD }}
           host: ${{ secrets.SUPABASE_DB_HOST }}
           port: ${{ secrets.SUPABASE_DB_PORT }}
           dbname: ${{ secrets.SUPABASE_DB_NAME }}
-          # MiniMax LLM
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           MINIMAX_BASE_URL: ${{ secrets.MINIMAX_BASE_URL }}
           MINIMAX_MODEL: ${{ secrets.MINIMAX_MODEL }}
-          # Optional
           JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
-          # Reduce log noise
           LOG_LEVEL: WARNING
         run: |
+          # UTC 08:00–11:00 = include 92 OPML blogs (daily full run); 2h cron hits 8 and 10 → ≥1 full/day
+          H=$(date -u +%H); [ "$H" -ge 8 ] && [ "$H" -le 11 ] && export FETCH_DAILY_FEEDS=1 || true
+          [ "${{ github.event.inputs.daily_feeds }}" = "true" ] && export FETCH_DAILY_FEEDS=1 || true
           python main.py \
             --skip-cluster \
             --limit ${{ github.event.inputs.limit || '30' }} \
