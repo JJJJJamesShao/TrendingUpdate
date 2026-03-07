@@ -23,11 +23,11 @@ load_dotenv(dotenv_path=_env_path)
 # ---------------------------------------------------------------------------
 # Environment Variables
 # ---------------------------------------------------------------------------
-# MiniMax LLM API (OpenAI-compatible endpoint)
-MINIMAX_API_KEY: str = os.getenv("MINIMAX_API_KEY", "")
-MINIMAX_MODEL: str = os.getenv("MINIMAX_MODEL", "MiniMax-M2.5")
-MINIMAX_BASE_URL: str = os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1")
-MINIMAX_API_URL: str = f"{MINIMAX_BASE_URL}/chat/completions"
+# Qwen LLM API (OpenAI-compatible endpoint)
+QWEN_API_KEY: str = os.getenv("QWEN_API_KEY", "")
+QWEN_MODEL: str = os.getenv("QWEN_MODEL", "qwen-plus")
+QWEN_BASE_URL: str = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+QWEN_API_URL: str = f"{QWEN_BASE_URL}/chat/completions"
 
 # Jina Reader (optional, for JS-heavy pages)
 JINA_API_KEY: str = os.getenv("JINA_API_KEY", "")

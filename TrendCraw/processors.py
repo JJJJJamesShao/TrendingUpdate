@@ -27,6 +27,7 @@ from config import (
     LLM_CLUSTER_BATCH_SIZE,
     CONTENT_SNIPPET_FOR_LLM,
     LLM_ENRICH_CONCURRENCY,
+    QWEN_API_KEY,
 )
 from fetchers import RawArticle
 from llm import chat_completion, parse_json_response, parse_json_array
@@ -173,7 +174,7 @@ async def cluster_articles_with_llm(
     articles: list[RawArticle],
     session: aiohttp.ClientSession | None = None,
 ) -> list[RawArticle]:
-    """Use MiniMax LLM to group articles by event and select the best source.
+    """Use Qwen LLM to group articles by event and select the best source.
 
     Selection rules:
     - Prefer Tier 1 sources (official / corporate).
@@ -244,6 +245,7 @@ No explanation, no markdown, just the JSON array."""
 # ===================================================================
 # STEP 4: Editorial Screening + Structured Summary (Combined LLM Call)
 # ===================================================================
+
 
 def _generate_fallback_content(article: RawArticle, summary: str | None) -> str:
     """Generate minimal Markdown when LLM enrichment fails. Use #### for section headings (→ <h4>)."""

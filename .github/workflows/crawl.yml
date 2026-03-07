@@ -2,8 +2,8 @@ name: AI Nexus — Crawl & Enrich Pipeline
 
 on:
   schedule:
-    # Every 2h. At 12:00 UTC we set FETCH_DAILY_FEEDS=1 (hot + 92 OPML blogs); else hot only.
-    - cron: "0 */2 * * *"
+    # Every 12h. At 08:00 UTC we set FETCH_DAILY_FEEDS=1 (hot + 92 OPML blogs); else hot only.
+    - cron: "0 */12 * * *"
 
   workflow_dispatch:
     inputs:
@@ -70,14 +70,14 @@ jobs:
           host: ${{ secrets.SUPABASE_DB_HOST }}
           port: ${{ secrets.SUPABASE_DB_PORT }}
           dbname: ${{ secrets.SUPABASE_DB_NAME }}
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-          MINIMAX_BASE_URL: ${{ secrets.MINIMAX_BASE_URL }}
-          MINIMAX_MODEL: ${{ secrets.MINIMAX_MODEL }}
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+          QWEN_BASE_URL: ${{ secrets.QWEN_BASE_URL }}
+          QWEN_MODEL: ${{ secrets.QWEN_MODEL }}
           JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
           LOG_LEVEL: WARNING
         run: |
-          # UTC 08:00–11:00 = include 92 OPML blogs (daily full run); 2h cron hits 8 and 10 → ≥1 full/day
-          H=$(date -u +%H); [ "$H" -ge 8 ] && [ "$H" -le 11 ] && export FETCH_DAILY_FEEDS=1 || true
+          # UTC 00:00 = include 92 OPML blogs (daily full run)
+          H=$(date -u +%H); [ "$H" -eq 0 ] && export FETCH_DAILY_FEEDS=1 || true
           [ "${{ github.event.inputs.daily_feeds }}" = "true" ] && export FETCH_DAILY_FEEDS=1 || true
           python main.py \
             --skip-cluster \

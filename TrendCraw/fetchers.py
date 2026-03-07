@@ -27,7 +27,7 @@ from config import (
     JINA_API_KEY,
     JINA_BASE_URL,
     JINA_SNIPPET_MIN_LENGTH,
-    MINIMAX_API_KEY,
+    QWEN_API_KEY,
     HN_FILTER_KEYWORDS,
     REQUEST_TIMEOUT_SECONDS,
     MAX_CONCURRENT_REQUESTS,
@@ -935,7 +935,7 @@ async def _extract_with_llm(
     """
     from llm import chat_completion
 
-    if not MINIMAX_API_KEY:
+    if not QWEN_API_KEY:
         return ""
 
     # Clean & truncate to stay within token budget

@@ -32,7 +32,7 @@ import aiohttp
 
 from config import (
     get_sources,
-    MINIMAX_API_KEY,
+    QWEN_API_KEY,
     DEFAULT_USER_AGENT,
     MAX_CONCURRENT_REQUESTS,
     ARTICLE_MAX_AGE_HOURS,
@@ -144,7 +144,7 @@ async def crawl_and_process(
         return []
 
     # ── Step 2c: LLM semantic clustering (optional) ────────────
-    if not skip_llm_cluster and MINIMAX_API_KEY and len(articles) > 1:
+    if not skip_llm_cluster and QWEN_API_KEY and len(articles) > 1:
         log.info(">>> STEP 2c: LLM semantic clustering...")
         connector = aiohttp.TCPConnector(limit=5)
         async with aiohttp.ClientSession(
@@ -157,8 +157,8 @@ async def crawl_and_process(
             return []
     elif skip_llm_cluster:
         log.info(">>> STEP 2c: LLM clustering SKIPPED (flag)")
-    elif not MINIMAX_API_KEY:
-        log.info(">>> STEP 2c: LLM clustering SKIPPED (no MINIMAX_API_KEY)")
+    elif not QWEN_API_KEY:
+        log.info(">>> STEP 2c: LLM clustering SKIPPED (no QWEN_API_KEY)")
 
     # ── Step 2d: Fetch full article content ─────────────────────
     # Fetch content for ALL articles first. ArXiv papers already have
@@ -198,8 +198,8 @@ async def crawl_and_process(
     # The LLM now does BOTH filtering (is_newsworthy?) and content
     # generation (structured summary) in one call.  Non-newsworthy
     # articles (Ask HN, Reddit Q&A, off-topic) are rejected here.
-    if not skip_enrichment and MINIMAX_API_KEY:
-        log.info(">>> STEP 3: Editorial screening + content generation (MiniMax LLM)...")
+    if not skip_enrichment and QWEN_API_KEY:
+        log.info(">>> STEP 3: Editorial screening + content generation (Qwen LLM)...")
         connector = aiohttp.TCPConnector(limit=5)
         async with aiohttp.ClientSession(
             connector=connector,
@@ -207,7 +207,7 @@ async def crawl_and_process(
         ) as session:
             results = await enrich_all(articles, session)
     else:
-        reason = "flag" if skip_enrichment else "no MINIMAX_API_KEY"
+        reason = "flag" if skip_enrichment else "no QWEN_API_KEY"
         log.info(">>> STEP 3: Enrichment SKIPPED (%s) — returning raw articles", reason)
         results = [
             ProcessedArticle(

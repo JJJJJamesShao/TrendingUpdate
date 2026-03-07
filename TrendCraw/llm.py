@@ -14,9 +14,9 @@ from typing import Any
 import aiohttp
 
 from config import (
-    MINIMAX_API_KEY,
-    MINIMAX_MODEL,
-    MINIMAX_API_URL,
+    QWEN_API_KEY,
+    QWEN_MODEL,
+    QWEN_API_URL,
     LLM_REQUEST_TIMEOUT,
 )
 from utils import log
@@ -33,7 +33,7 @@ async def chat_completion(
     max_tokens: int = 1024,
     session: aiohttp.ClientSession | None = None,
 ) -> str:
-    """Send a chat completion request to MiniMax and return the response text.
+    """Send a chat completion request to Qwen and return the response text.
 
     Args:
         prompt:         User message content.
@@ -45,17 +45,17 @@ async def chat_completion(
     Returns:
         The assistant's response text, or empty string on failure.
     """
-    if not MINIMAX_API_KEY:
-        log.error("MINIMAX_API_KEY is not set — cannot call LLM")
+    if not QWEN_API_KEY:
+        log.error("QWEN_API_KEY is not set — cannot call LLM")
         return ""
 
     headers = {
-        "Authorization": f"Bearer {MINIMAX_API_KEY}",
+        "Authorization": f"Bearer {QWEN_API_KEY}",
         "Content-Type": "application/json",
     }
 
     payload = {
-        "model": MINIMAX_MODEL,
+        "model": QWEN_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
@@ -71,11 +71,11 @@ async def chat_completion(
     try:
         timeout = aiohttp.ClientTimeout(total=LLM_REQUEST_TIMEOUT)
         async with session.post(
-            MINIMAX_API_URL, json=payload, headers=headers, timeout=timeout
+            QWEN_API_URL, json=payload, headers=headers, timeout=timeout
         ) as resp:
             if resp.status != 200:
                 body = await resp.text()
-                log.error("MiniMax API error HTTP %d: %s", resp.status, body[:300])
+                log.error("Qwen API error HTTP %d: %s", resp.status, body[:300])
                 return ""
 
             data: dict[str, Any] = await resp.json()
@@ -84,7 +84,7 @@ async def chat_completion(
         if "error" in data:
             err = data["error"]
             log.error(
-                "MiniMax API error: %s (type: %s)",
+                "Qwen API error: %s (type: %s)",
                 err.get("message", "unknown"),
                 err.get("type", "unknown"),
             )
@@ -93,7 +93,7 @@ async def chat_completion(
         # Extract content (OpenAI-compatible response)
         choices = data.get("choices", [])
         if not choices:
-            log.warning("MiniMax returned empty choices")
+            log.warning("Qwen returned empty choices")
             return ""
 
         content = choices[0].get("message", {}).get("content", "")
@@ -101,7 +101,7 @@ async def chat_completion(
         # Log token usage
         usage = data.get("usage", {})
         log.debug(
-            "MiniMax tokens — prompt: %d, completion: %d, total: %d",
+            "Qwen tokens — prompt: %d, completion: %d, total: %d",
             usage.get("prompt_tokens", 0),
             usage.get("completion_tokens", 0),
             usage.get("total_tokens", 0),
@@ -110,7 +110,7 @@ async def chat_completion(
         return _strip_think_tags(content.strip())
 
     except Exception as e:
-        log.error("MiniMax API call failed: %s", e)
+        log.error("Qwen API call failed: %s", e)
         return ""
     finally:
         if own_session:

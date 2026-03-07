@@ -49,7 +49,7 @@ Examples:
     parser.add_argument(
         "--llm",
         action="store_true",
-        help="Enable LLM enrichment in --dry-run mode (requires MINIMAX_API_KEY)",
+        help="Enable LLM enrichment in --dry-run mode (requires QWEN_API_KEY)",
     )
     parser.add_argument(
         "--limit",
