@@ -43,9 +43,9 @@ DEDUP_SIMILARITY_THRESHOLD = 85  # rapidfuzz score threshold (0-100)
 DEDUP_TIME_WINDOW_HOURS = 24     # Only compare against items from last N hours
 LLM_CLUSTER_BATCH_SIZE = 25      # Max items per LLM clustering call
 REQUEST_TIMEOUT_SECONDS = 10     # Per-request timeout for aiohttp (was 15)
-MAX_CONCURRENT_REQUESTS = 10     # Semaphore limit for parallel fetches
-LLM_REQUEST_TIMEOUT = 45         # Timeout for LLM API calls
-LLM_ENRICH_CONCURRENCY = 3      # Parallel LLM enrichment calls (saves ~60% time)
+MAX_CONCURRENT_REQUESTS = 20     # Semaphore limit for parallel fetches
+LLM_REQUEST_TIMEOUT = 90         # Timeout for LLM API calls (increased for Qwen)
+LLM_ENRICH_CONCURRENCY = 20     # Parallel LLM enrichment calls
 
 # ── Freshness filter ──
 # Only process articles published within the last N hours.
@@ -55,7 +55,7 @@ ARTICLE_MAX_AGE_HOURS = 4
 # ── Content fetching & extraction ──
 CONTENT_MAX_LENGTH = 10000       # Max chars to store in the `content` column (Markdown)
 CONTENT_SNIPPET_FOR_LLM = 6000  # Max content chars sent to LLM for summarization
-CONTENT_FETCH_CONCURRENCY = 5   # Parallel content page fetches
+CONTENT_FETCH_CONCURRENCY = 20  # Parallel content page fetches
 CONTENT_FETCH_TIMEOUT = 20      # Seconds per content page fetch
 LLM_EXTRACT_MAX_INPUT = 12000   # Max chars of cleaned HTML to send to LLM extractor
 

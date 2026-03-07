@@ -44,7 +44,7 @@ from config import (
     CONTENT_FETCH_TIMEOUT,
     LLM_EXTRACT_MAX_INPUT,
 )
-from utils import log, strip_html, truncate
+from utils import log, strip_html, truncate, extract_article_text
 
 # ---------------------------------------------------------------------------
 # Optional dependencies for content extraction (graceful degradation)
@@ -667,7 +667,7 @@ async def fetch_hackernews(
 
                     # Extract text using multi-strategy pipeline
                     # Strategy 1: Heuristic HTML isolation + html2text
-                    content = _extract_article_text(html)
+                    content = extract_article_text(html)
 
                     # Strategy 2: trafilatura fallback
                     if not content or len(content) < 200:

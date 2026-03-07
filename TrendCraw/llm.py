@@ -7,6 +7,7 @@ Uses aiohttp for non-blocking calls within the async pipeline.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -49,6 +50,10 @@ async def chat_completion(
         log.error("QWEN_API_KEY is not set — cannot call LLM")
         return ""
 
+    # Log API config (mask key for security)
+    api_key_preview = QWEN_API_KEY[:8] + "..." if len(QWEN_API_KEY) > 8 else QWEN_API_KEY
+    log.info("Qwen API: URL=%s, model=%s, key=%s", QWEN_API_URL, QWEN_MODEL, api_key_preview)
+
     headers = {
         "Authorization": f"Bearer {QWEN_API_KEY}",
         "Content-Type": "application/json",
@@ -70,15 +75,19 @@ async def chat_completion(
 
     try:
         timeout = aiohttp.ClientTimeout(total=LLM_REQUEST_TIMEOUT)
+        log.debug("Qwen API request: URL=%s, model=%s, messages=%d",
+                  QWEN_API_URL, QWEN_MODEL, len(payload.get("messages", [])))
         async with session.post(
             QWEN_API_URL, json=payload, headers=headers, timeout=timeout
         ) as resp:
+            log.debug("Qwen API response status: %d", resp.status)
             if resp.status != 200:
                 body = await resp.text()
-                log.error("Qwen API error HTTP %d: %s", resp.status, body[:300])
+                log.error("Qwen API error HTTP %d: %s", resp.status, body[:500])
                 return ""
 
             data: dict[str, Any] = await resp.json()
+            log.debug("Qwen API response: %s", data)
 
         # Check for API-level errors (OpenAI-compatible format)
         if "error" in data:
@@ -109,8 +118,18 @@ async def chat_completion(
 
         return _strip_think_tags(content.strip())
 
+    except asyncio.TimeoutError as e:
+        log.error("Qwen API timeout after %ds: %s", LLM_REQUEST_TIMEOUT, e)
+        return ""
+    except aiohttp.ClientError as e:
+        log.error("Qwen API network error: %s - %s", type(e).__name__, str(e))
+        import traceback
+        log.debug("Traceback: %s", traceback.format_exc())
+        return ""
     except Exception as e:
-        log.error("Qwen API call failed: %s", e)
+        log.error("Qwen API call failed: %s - %s | repr=%r", type(e).__name__, str(e), e)
+        import traceback
+        log.debug("Traceback: %s", traceback.format_exc())
         return ""
     finally:
         if own_session:
