@@ -74,9 +74,50 @@ JINA_SNIPPET_MIN_LENGTH = 80     # Characters
 # Reddit requires a custom User-Agent
 REDDIT_USER_AGENT = "AI-Nexus-Bot/2.0 (News Aggregation Research)"
 
-# Hacker News API filter keywords
-HN_FILTER_KEYWORDS = ["GPT", "LLM", "Transformer", "AI", "OpenAI", "Claude",
-                       "Gemini", "Llama", "Mistral", "neural", "deep learning"]
+# =============================================================================
+# Hacker News Three-Stage Funnel Configuration
+# =============================================================================
+
+# Stage 1: Keyword filter (50+ AI-related terms)
+HN_FILTER_KEYWORDS = [
+    # Core AI/ML
+    "AI", "ML", "LLM", "AGI", "ANN", "CNN", "RNN", "GAN", "VAE", "MoE",
+    "Transformer", "Diffusion", "neural network", "deep learning", "machine learning",
+
+    # Hot topics
+    "Agent", "Agents", "RAG", "ReAct", "CoT", "fine-tuning", "prompt", "in-context",
+    "RLHF", "alignment", "hallucination", "emergent", "reasoning",
+
+    # Models & Companies
+    "GPT", "Claude", "Gemini", "Llama", "Mistral", "PaLM", "Gemini", "Bard",
+    "OpenAI", "Anthropic", "DeepMind", "Cohere", "Midjourney", "Stability AI",
+
+    # Technical terms
+    "inference", "token", "embedding", "vector", "quantization", "distillation",
+    "attention", "backbone", "encoder", "decoder", "fine-tune",
+
+    # Applications
+    "copilot", "chatbot", "autocomplete", "code generation", "text-to-image",
+    "text-to-video", "voice cloning", "speech synthesis",
+]
+
+# Stage 1: Score and comment thresholds
+HN_MIN_SCORE = 100        # Minimum HN score
+HN_MIN_COMMENTS = 30      # Minimum comment count
+HN_TOP_N = 500            # Only check top N hot stories
+
+# Stage 2: Content extraction limit (~8000 chars ≈ 2000 tokens)
+HN_CONTENT_MAX_LENGTH = 8000
+
+# Stage 3: AI semantic scoring threshold (only keep articles with score >= 6)
+HN_AI_SCORE_THRESHOLD = 6
+
+# Domains to exclude (social media, low-quality sources)
+HN_EXCLUDED_DOMAINS = [
+    "twitter.com", "x.com", "youtube.com", "youtu.be",
+    "reddit.com", "facebook.com", "instagram.com", "tiktok.com",
+    "linkedin.com", "medium.com",  # Often low-quality reposts
+]
 
 
 # ---------------------------------------------------------------------------

@@ -60,6 +60,7 @@ async def crawl_and_process(
     enrich_limit: int = 0,
     max_age_hours: int = 0,
     include_daily_feeds: bool = False,
+    hn_apply_stage3: bool = True,  # HN 专用：启用三层漏斗 Stage 3 AI 评分
 ) -> list[ProcessedArticle]:
     """One-call interface: Fetch → Deduplicate → Summarize → Return.
 
@@ -76,6 +77,7 @@ async def crawl_and_process(
         enrich_limit:     If > 0, only enrich the first N articles (saves API quota).
         max_age_hours:    Override freshness filter (0 = use config default).
         include_daily_feeds: If True, also fetch 92 OPML blog feeds (for daily run).
+        hn_apply_stage3:  If True, apply HN Stage 3 AI scoring filter (default: True).
 
     Returns:
         List of ProcessedArticle ready for database insertion via .to_db_dict().
@@ -90,11 +92,12 @@ async def crawl_and_process(
              "hot+daily" if include_daily_feeds else "hot only",
              len(known_urls) if known_urls else 0,
              len(known_titles) if known_titles else 0)
+    log.info("  HN Stage 3 AI Scoring: %s", "ENABLED" if hn_apply_stage3 else "DISABLED")
     log.info("=" * 60)
 
     # ── Step 1: Fetch all sources ──────────────────────────────
     log.info(">>> STEP 1: Fetching from %d sources...", len(sources))
-    raw_articles = await fetch_all_sources(sources)
+    raw_articles = await fetch_all_sources(sources, hn_apply_stage3=hn_apply_stage3)
     log.info("Fetched %d raw articles", len(raw_articles))
 
     if not raw_articles:

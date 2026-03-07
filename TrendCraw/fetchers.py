@@ -29,6 +29,12 @@ from config import (
     JINA_SNIPPET_MIN_LENGTH,
     QWEN_API_KEY,
     HN_FILTER_KEYWORDS,
+    HN_MIN_SCORE,
+    HN_MIN_COMMENTS,
+    HN_TOP_N,
+    HN_CONTENT_MAX_LENGTH,
+    HN_AI_SCORE_THRESHOLD,
+    HN_EXCLUDED_DOMAINS,
     REQUEST_TIMEOUT_SECONDS,
     MAX_CONCURRENT_REQUESTS,
     FETCH_MAX_RETRIES,
@@ -472,15 +478,60 @@ async def fetch_reddit(session: aiohttp.ClientSession, source: SourceConfig) -> 
 # ---------------------------------------------------------------------------
 # Fetcher: Hacker News API (filtered by keywords)
 # ---------------------------------------------------------------------------
-async def fetch_hackernews(session: aiohttp.ClientSession, source: SourceConfig) -> list[RawArticle]:
-    """Fetch top/new stories from HN API, filtered by AI-related keywords."""
+async def fetch_hackernews(
+    session: aiohttp.ClientSession,
+    source: SourceConfig,
+    *,
+    apply_stage3_llm: bool = False,
+) -> list[RawArticle]:
+    """
+    Fetch HN stories with Three-Stage Funnel filtering.
+
+    Stage 1: Metadata & Rule Filter (zero-cost, ultra-fast)
+      - Score threshold: HN score > 100
+      - Comment threshold: comments > 30
+      - Keyword match: title contains AI-related keywords (50+ terms)
+      - Domain filter: exclude Twitter/X, YouTube, Reddit, Facebook, etc.
+      - Scope: Only top HN_TOP_N (500) hot stories
+
+    Stage 2: Content Extraction (low-cost)
+      - Fetch article body content
+      - Strip HTML tags, scripts, styles
+      - Limit content length (~8000 chars ≈ 2000 tokens)
+      - Filter out articles that fail to extract
+
+    Stage 3: AI Semantic Scoring (core filter) — optional, controlled by caller
+      - AI scoring standard:
+        - 8-10: Hard-core AI open-source projects, high-quality architecture discussions,
+                major model releases, technical innovations
+        - 5-7:  Valuable tech sharing, tutorials, medium-quality open-source projects
+        - 0-4:  Ordinary AI business news, hype, marketing content, low-quality reposts
+      - Threshold: Only keep articles with AI score >= 6
+      - Output: Chinese summary, technical tags, scoring rationale
+
+    Args:
+        session:          Shared aiohttp session
+        source:           SourceConfig for HN
+        apply_stage3_llm: If True, apply Stage 3 AI scoring filter (requires QWEN_API_KEY)
+
+    Returns:
+        List of filtered RawArticle instances
+    """
+    import re
+    from urllib.parse import urlparse
+
     sem = _get_semaphore()
     base = source.url  # https://hacker-news.firebaseio.com/v0
+
+    # =========================================================================
+    # Stage 1: Metadata & Rule Filter
+    # =========================================================================
+    log.info("[%s] Stage 1: Fetching top %d HN stories...", source.name, HN_TOP_N)
 
     async with sem:
         try:
             timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-            async with session.get(f"{base}/newstories.json", timeout=timeout) as resp:
+            async with session.get(f"{base}/topstories.json", timeout=timeout) as resp:
                 if resp.status != 200:
                     log.warning("[%s] HTTP %d fetching story IDs", source.name, resp.status)
                     return []
@@ -489,8 +540,8 @@ async def fetch_hackernews(session: aiohttp.ClientSession, source: SourceConfig)
             log.error("[%s] Failed to fetch story IDs: %s", source.name, e)
             return []
 
-    # Only check the most recent 100 stories to stay within limits
-    story_ids = story_ids[:100]
+    # Only check top N stories
+    story_ids = story_ids[:HN_TOP_N]
 
     async def _fetch_item(sid: int) -> dict[str, Any] | None:
         async with _get_semaphore():
@@ -507,32 +558,67 @@ async def fetch_hackernews(session: aiohttp.ClientSession, source: SourceConfig)
     tasks = [_fetch_item(sid) for sid in story_ids]
     results = await asyncio.gather(*tasks)
 
-    articles: list[RawArticle] = []
+    # Pre-compile keyword patterns (case-insensitive)
     keywords_lower = [kw.lower() for kw in HN_FILTER_KEYWORDS]
+
+    # Domain exclusion helper
+    def _is_excluded_domain(url: str) -> bool:
+        if not url:
+            return False  # HN posts without URL are discussion threads, skip later
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+            # Remove www. prefix for matching
+            domain = domain.replace("www.", "")
+            return any(excluded in domain for excluded in HN_EXCLUDED_DOMAINS)
+        except Exception:
+            return False
+
+    articles: list[RawArticle] = []
+    stage1_passed = 0
 
     for item in results:
         if not item or item.get("type") != "story":
             continue
+
         title = item.get("title", "")
         url = item.get("url", "")
+        score = item.get("score", 0) or 0
+        descendants = item.get("descendants", 0) or 0  # Comment count
 
-        # Pre-filter: skip user questions & discussion threads
-        # Keep "Show HN:" (new project announcements are valuable)
+        # ── Stage 1 Filters ────────────────────────────────────────────────
+        # Filter 1: Score threshold
+        if score < HN_MIN_SCORE:
+            continue
+
+        # Filter 2: Comment threshold
+        if descendants < HN_MIN_COMMENTS:
+            continue
+
+        # Filter 3: Skip discussion threads (Ask HN, Tell HN)
         title_lower = title.lower()
         if title_lower.startswith("ask hn:") or title_lower.startswith("tell hn:"):
             continue
 
-        # Filter: must match at least one AI keyword
+        # Filter 4: Keyword match
         if not any(kw in title_lower for kw in keywords_lower):
             continue
 
+        # Filter 5: Domain exclusion (social media, low-quality)
+        if _is_excluded_domain(url):
+            continue
+
+        stage1_passed += 1
+
+        # Build URL (HN posts without URL link to discussion)
         if not url:
             url = f"https://news.ycombinator.com/item?id={item.get('id', '')}"
 
         created = item.get("time", 0)
         published = datetime.fromtimestamp(created, tz=timezone.utc) if created else datetime.now(timezone.utc)
 
-        articles.append(RawArticle(
+        # Store metadata for Stage 3
+        article = RawArticle(
             title=title,
             url=url,
             source_name=source.name,
@@ -540,10 +626,175 @@ async def fetch_hackernews(session: aiohttp.ClientSession, source: SourceConfig)
             category=source.category,
             published_at=published,
             content_snippet="",
-        ))
+            full_content="",
+        )
+        # Attach HN metadata for later stages
+        article._hn_score = score
+        article._hn_comments = descendants
+        articles.append(article)
 
-    log.info("[%s] Fetched %d AI-related stories from HN", source.name, len(articles))
+    log.info(
+        "[%s] Stage 1 complete: %d → %d stories (score>%d, comments>%d, keywords, domain filter)",
+        source.name, len(results), len(articles), HN_MIN_SCORE, HN_MIN_COMMENTS,
+    )
+
+    if not articles:
+        return []
+
+    # =========================================================================
+    # Stage 2: Content Extraction
+    # =========================================================================
+    log.info("[%s] Stage 2: Extracting content from %d articles...", source.name, len(articles))
+
+    # Fetch content with limited concurrency
+    content_sem = asyncio.Semaphore(CONTENT_FETCH_CONCURRENCY)
+
+    async def _fetch_content(article: RawArticle) -> None:
+        """Fetch and extract article content."""
+        # Skip HN discussion URLs (no external content)
+        if "news.ycombinator.com" in article.url:
+            article.full_content = f"HN Discussion: {article.title}"
+            return
+
+        async with content_sem:
+            try:
+                timeout = aiohttp.ClientTimeout(total=CONTENT_FETCH_TIMEOUT)
+                headers = {"User-Agent": DEFAULT_USER_AGENT}
+                async with session.get(article.url, timeout=timeout, headers=headers) as resp:
+                    if resp.status != 200:
+                        return
+                    html = await resp.text()
+
+                    # Extract text using multi-strategy pipeline
+                    # Strategy 1: Heuristic HTML isolation + html2text
+                    content = _extract_article_text(html)
+
+                    # Strategy 2: trafilatura fallback
+                    if not content or len(content) < 200:
+                        if _HAS_TRAFILATURA:
+                            content = trafilatura.extract(html) or ""
+
+                    # Limit content length
+                    if content and len(content) > HN_CONTENT_MAX_LENGTH:
+                        content = content[:HN_CONTENT_MAX_LENGTH]
+
+                    article.full_content = content or ""
+
+            except Exception as e:
+                log.debug("[%s] Failed to fetch content for %s: %s", source.name, article.url[:50], e)
+
+    # Fetch content for all articles
+    await asyncio.gather(*[_fetch_content(a) for a in articles])
+
+    # Filter: must have extracted content (>100 chars)
+    before_stage2 = len(articles)
+    articles = [a for a in articles if a.full_content and len(a.full_content.strip()) > 100]
+    stage2_dropped = before_stage2 - len(articles)
+
+    log.info(
+        "[%s] Stage 2 complete: %d → %d articles (extracted %d, dropped %d)",
+        source.name, before_stage2, len(articles),
+        sum(1 for a in articles if a.full_content), stage2_dropped,
+    )
+
+    if not articles:
+        return []
+
+    # =========================================================================
+    # Stage 3: AI Semantic Scoring (optional)
+    # =========================================================================
+    if apply_stage3_llm and QWEN_API_KEY:
+        log.info("[%s] Stage 3: AI semantic scoring with Qwen LLM...", source.name)
+        articles = await _hn_ai_scoring_batch(articles, session)
+        log.info(
+            "[%s] Stage 3 complete: %d articles retained (AI score >= %d)",
+            source.name, len(articles), HN_AI_SCORE_THRESHOLD,
+        )
+
     return articles
+
+
+# ---------------------------------------------------------------------------
+# HN Stage 3: AI Semantic Scoring with Qwen LLM
+# ---------------------------------------------------------------------------
+_HN_SCORING_PROMPT = """You are an expert AI/ML technical reviewer evaluating Hacker News articles.
+
+TASK:
+Score each article based on technical depth and innovation. Be critical — most AI news is hype.
+
+SCORING RUBRIC:
+- 8-10 points: Hard-core AI open-source projects, high-quality architecture discussions,
+               major model releases, genuine technical innovations
+- 5-7 points:  Valuable tech sharing, tutorials, medium-quality open-source projects
+- 0-4 points:  Ordinary AI business news, hype, marketing, low-quality reposts
+
+THRESHOLD: Only articles scoring >= 6 should be kept.
+
+ARTICLE TO EVALUATE:
+Title: {title}
+HN Score: {hn_score} | Comments: {hn_comments}
+Content:
+{content}
+
+Respond with ONLY valid JSON (no markdown, no reasoning):
+{{
+  "ai_score": 7,
+  "is_worthy": true,
+  "reason_zh": "简短的中文评分理由",
+  "tech_tags": ["LLM", "开源项目", "架构设计"],
+  "summary_zh": "2-3 句中文摘要"
+}}
+
+If score < 6, set is_worthy: false."""
+
+
+async def _hn_ai_scoring_batch(
+    articles: list[RawArticle],
+    session: aiohttp.ClientSession,
+) -> list[RawArticle]:
+    """Stage 3: AI semantic scoring batch processing."""
+    from TrendCraw.llm import chat_completion, parse_json_response
+
+    sem = asyncio.Semaphore(3)  # Limit concurrency
+    results: list[RawArticle] = []
+
+    async def _score_one(article: RawArticle) -> RawArticle | None:
+        async with sem:
+            content = article.full_content[:6000]  # Limit input
+            prompt = _HN_SCORING_PROMPT.format(
+                title=article.title,
+                hn_score=getattr(article, "_hn_score", 0),
+                hn_comments=getattr(article, "_hn_comments", 0),
+                content=content,
+            )
+
+            response = await chat_completion(
+                prompt,
+                system_prompt="You are a strict AI/ML technical reviewer. Respond with JSON only.",
+                temperature=0.1,
+                max_tokens=500,
+                session=session,
+            )
+
+            result = parse_json_response(response)
+
+            if result and result.get("is_worthy", False) and result.get("ai_score", 0) >= HN_AI_SCORE_THRESHOLD:
+                # Store scoring metadata
+                article._ai_score = result.get("ai_score", 0)
+                article._ai_reason = result.get("reason_zh", "")
+                article._ai_tags = result.get("tech_tags", [])
+                article._ai_summary = result.get("summary_zh", "")
+                return article
+            else:
+                log.debug(
+                    "[HN] Filtered '%s' (score=%s)",
+                    article.title[:40],
+                    result.get("ai_score", "parse_failed") if result else "parse_failed",
+                )
+                return None
+
+    scored = await asyncio.gather(*[_score_one(a) for a in articles])
+    return [a for a in scored if a is not None]
 
 
 # ---------------------------------------------------------------------------
@@ -649,15 +900,26 @@ async def fetch_via_jina(session: aiohttp.ClientSession, url: str) -> str:
 # ---------------------------------------------------------------------------
 # Dispatcher: Route source to the correct fetcher
 # ---------------------------------------------------------------------------
-async def fetch_source(session: aiohttp.ClientSession, source: SourceConfig) -> list[RawArticle]:
-    """Dispatch a source config to the appropriate fetcher."""
+async def fetch_source(
+    session: aiohttp.ClientSession,
+    source: SourceConfig,
+    *,
+    hn_apply_stage3: bool = False,
+) -> list[RawArticle]:
+    """Dispatch a source config to the appropriate fetcher.
+
+    Args:
+        session:          Shared aiohttp session
+        source:           SourceConfig to fetch
+        hn_apply_stage3:  If True, apply HN Stage 3 AI scoring (requires QWEN_API_KEY)
+    """
     match source.source_type:
         case "rss":
             return await fetch_rss(session, source)
         case "reddit_json":
             return await fetch_reddit(session, source)
         case "hn_api":
-            return await fetch_hackernews(session, source)
+            return await fetch_hackernews(session, source, apply_stage3_llm=hn_apply_stage3)
         case "arxiv":
             return await fetch_arxiv(source)
         case _:
@@ -668,11 +930,19 @@ async def fetch_source(session: aiohttp.ClientSession, source: SourceConfig) -> 
 # ---------------------------------------------------------------------------
 # Top-level: Fetch ALL sources concurrently
 # ---------------------------------------------------------------------------
-async def fetch_all_sources(sources: list[SourceConfig]) -> list[RawArticle]:
+async def fetch_all_sources(
+    sources: list[SourceConfig],
+    *,
+    hn_apply_stage3: bool = False,
+) -> list[RawArticle]:
     """Fetch articles from all configured sources in parallel.
 
     Creates a shared aiohttp session with proper defaults (User-Agent,
     connection limits) and dispatches all sources concurrently.
+
+    Args:
+        sources:          List of SourceConfig to fetch
+        hn_apply_stage3:  If True, apply HN Stage 3 AI scoring (requires QWEN_API_KEY)
 
     Returns a flat list of all RawArticle instances.
     """
@@ -685,7 +955,7 @@ async def fetch_all_sources(sources: list[SourceConfig]) -> list[RawArticle]:
     default_headers = {"User-Agent": DEFAULT_USER_AGENT}
 
     async with aiohttp.ClientSession(connector=connector, headers=default_headers) as session:
-        tasks = [fetch_source(session, src) for src in sources]
+        tasks = [fetch_source(session, src, hn_apply_stage3=hn_apply_stage3) for src in sources]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     all_articles: list[RawArticle] = []
