@@ -221,6 +221,8 @@ async def crawl_and_process(
                 category=a.category,
                 summary=a.title,
                 content=a.full_content or a.content_snippet or a.title,
+                insight="",
+                tags=[],
                 is_processed=False,
             )
             for a in articles

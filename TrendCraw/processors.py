@@ -47,6 +47,8 @@ class ProcessedArticle:
     category: str = "General"
     summary: str | None = None
     content: str | None = None
+    insight: str = ""
+    tags: list[str] = []
     is_processed: bool = False
 
     def to_db_dict(self) -> dict[str, Any]:
@@ -57,6 +59,8 @@ class ProcessedArticle:
             "source_name": self.source_name,
             "summary": self.summary,
             "content": self.content,
+            "insight": self.insight,
+            "tags": self.tags,
             "published_at": self.published_at.isoformat(),
             "category": self.category,
             "is_processed": self.is_processed,
@@ -300,6 +304,10 @@ Why does this paper matter? What are the practical implications for the AI commu
 
 TARGET LENGTH: 1500-2500 characters. Be thorough and precise. Use only standard Markdown: ####, **bold**, - lists, [links](url).
 
+═══ TAGS & INSIGHT ═══
+- tags: Pick 1-3 most relevant tags from: ["LLM", "Agents", "Infra", "Tools", "Research", "Industry", "Business"]
+- insight: A sharp, opinionated one-sentence insight (≤20 words) on how this impacts developers or AI business
+
 ═══ RESPONSE FORMAT ═══
 Return ONLY valid JSON:
 {{
@@ -308,7 +316,9 @@ Return ONLY valid JSON:
   "category": "Research",
   "importance": 7,
   "summary": "2-3 sentence summary: what the paper proposes and its key result",
-  "content": "#### Problem Statement\\n...\\n\\n#### Proposed Approach\\n...\\n\\n..."
+  "content": "#### Problem Statement\\n...\\n\\n#### Proposed Approach\\n...\\n\\n...",
+  "tags": ["Research", "LLM"],
+  "insight": "This architecture could halve inference costs for large-scale deployments."
 }}
 
 If the paper is NOT about AI/ML (e.g., pure mathematics, biology without ML):
@@ -318,12 +328,15 @@ If the paper is NOT about AI/ML (e.g., pure mathematics, biology without ML):
   "category": "General",
   "importance": 0,
   "summary": "",
-  "content": ""
+  "content": "",
+  "tags": [],
+  "insight": ""
 }}"""
 
     sys_prompt = (
         "You are an AI/ML research scientist writing paper summaries for a professional audience. "
         "Extract ALL technical details from the abstract. Be precise with numbers and methodology. "
+        "Your 'insight' must be highly opinionated, sharp, and insightful — not generic. "
         "Respond with ONLY valid JSON. No reasoning, no markdown fences."
     )
     return prompt, sys_prompt
@@ -393,6 +406,10 @@ What this means for the AI industry, developers, researchers, and end users.
 
 Use only standard Markdown: ####, **bold**, - lists, [links](url). No HTML.
 
+═══ TAGS & INSIGHT ═══
+- tags: Pick 1-3 most relevant tags from: ["LLM", "Agents", "Infra", "Tools", "Research", "Industry", "Business"]
+- insight: A sharp, opinionated one-sentence insight (≤20 words) on how this impacts developers or AI business
+
 ═══ RESPONSE FORMAT ═══
 Return ONLY valid JSON (no markdown fences, no reasoning):
 {{
@@ -401,7 +418,9 @@ Return ONLY valid JSON (no markdown fences, no reasoning):
   "category": "AI or LLM or Hardware or Research or Industry",
   "importance": 7,
   "summary": "2-3 sentence executive summary for the article card",
-  "content": "#### Overview\\n...\\n\\n#### Key Highlights\\n- ...\\n\\n..."
+  "content": "#### Overview\\n...\\n\\n#### Key Highlights\\n- ...\\n\\n...",
+  "tags": ["LLM", "Industry"],
+  "insight": "Open-source alternatives will force proprietary vendors to justify their pricing."
 }}
 
 If NOT publishable:
@@ -411,13 +430,16 @@ If NOT publishable:
   "category": "General",
   "importance": 0,
   "summary": "",
-  "content": ""
+  "content": "",
+  "tags": [],
+  "insight": ""
 }}"""
 
     sys_prompt = (
         "You are a senior AI industry editor writing for an expert readership. "
         "Produce thorough, detailed article summaries that capture ALL key information "
-        "from the source material. Respond with ONLY valid JSON. No reasoning, no markdown fences."
+        "from the source material. Your 'insight' must be highly opinionated, sharp, and insightful — not generic. "
+        "Respond with ONLY valid JSON. No reasoning, no markdown fences."
     )
     return prompt, sys_prompt
 
@@ -470,6 +492,8 @@ async def enrich_article(
 
         content_md = result.get("content", "")
         summary = result.get("summary", "")
+        insight = result.get("insight", "")
+        tags = result.get("tags", [])
 
         # Ensure content is not empty — fallback if LLM returned thin content
         if not content_md or len(content_md.strip()) < 50:
@@ -482,6 +506,10 @@ async def enrich_article(
         if not summary:
             summary = f"{article.title} — from {article.source_name}."
 
+        # Ensure tags is a valid list
+        if not isinstance(tags, list):
+            tags = []
+
         return ProcessedArticle(
             title=article.title,
             original_url=article.url,
@@ -490,6 +518,8 @@ async def enrich_article(
             category=result.get("category", article.category),
             summary=summary,
             content=content,
+            insight=insight,
+            tags=tags,
             is_processed=True,
         )
 
@@ -505,6 +535,8 @@ async def enrich_article(
         category=article.category,
         summary=f"{article.title} — from {article.source_name}.",
         content=content,
+        insight="",
+        tags=[],
         is_processed=False,
     )
 

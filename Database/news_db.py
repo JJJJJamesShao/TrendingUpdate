@@ -91,7 +91,7 @@ def insert_news_items(items: list[dict[str, Any]]) -> int:
     """Batch-insert news items with ON CONFLICT DO NOTHING (idempotent).
 
     Each item dict should have keys:
-        title, original_url, source_name, summary, content, published_at, category, is_processed
+        title, original_url, source_name, summary, content, insight, tags, published_at, category, is_processed
 
     Returns the number of rows actually inserted.
     """
@@ -100,9 +100,9 @@ def insert_news_items(items: list[dict[str, Any]]) -> int:
 
     sql = """
         INSERT INTO news_items
-            (title, original_url, source_name, summary, content, published_at, category, is_processed)
+            (title, original_url, source_name, summary, content, insight, tags, published_at, category, is_processed)
         VALUES
-            (%(title)s, %(original_url)s, %(source_name)s, %(summary)s, %(content)s, %(published_at)s, %(category)s, %(is_processed)s)
+            (%(title)s, %(original_url)s, %(source_name)s, %(summary)s, %(content)s, %(insight)s, %(tags)s, %(published_at)s, %(category)s, %(is_processed)s)
         ON CONFLICT (original_url) DO NOTHING
     """
 
@@ -172,6 +172,18 @@ def ensure_table_exists() -> None:
                         WHERE table_name = 'news_items' AND column_name = 'content'
                     ) THEN
                         ALTER TABLE news_items ADD COLUMN content TEXT;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'news_items' AND column_name = 'insight'
+                    ) THEN
+                        ALTER TABLE news_items ADD COLUMN insight TEXT;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'news_items' AND column_name = 'tags'
+                    ) THEN
+                        ALTER TABLE news_items ADD COLUMN tags TEXT[];
                     END IF;
                 END $$;
             """)
