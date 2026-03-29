@@ -12,7 +12,7 @@ LLM calls use MiniMax API via llm.py. Prompts are in English
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -48,7 +48,7 @@ class ProcessedArticle:
     summary: str | None = None
     content: str | None = None
     insight: str = ""
-    tags: list[str] = []
+    tags: list[str] = field(default_factory=list)
     is_processed: bool = False
 
     def to_db_dict(self) -> dict[str, Any]:
